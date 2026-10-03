@@ -1,4 +1,4 @@
-# Trip Planner
+# TripCS
 
 여행 계획을 만들고 관리할 수 있는 웹 서비스 프로젝트입니다.
 
@@ -414,3 +414,313 @@ Authorization: Bearer <access_token>
                             ↓
                      현재 사용자 확인
 ```
+
+
+# Day 3 Trip CRUD / 사용자 권한 / 구글 및 카카오 SNS 로그인
+
+## 오늘의 목표
+- trip CURD 완성
+- 로그인 사용자별 소유권 관리 및 다른 사용자의 trip 접근 차단 테스트
+- google oauth 및 kakao oauth 로그인
+- sns 로그인 계정을 social_account 테이블과 연결
+- google / kakao 로그인 후에도 trip planner 자체 JWT 발급
+
+## Google SNS 로그인
+
+### Google OAuth 설정
+
+Google Cloud에서 OAuth Client를 생성했다.
+
+```text
+Application Type: Web application
+Redirect URI: http://localhost:8000/auth/google/callback
+```
+Client Secret은 외부에 노출하면 안 되므로 `.env`에 저장한다.
+
+### httpx 설치
+
+```powershell
+pip install httpx
+```
+
+`httpx`를 이용해 OAuth 서버에 토큰 요청과 사용자 정보 요청을 보낸다.
+
+---
+
+### Google OAuth Service
+
+파일:
+
+```text
+backend/services/google_oauth.py
+```
+
+주요 함수:
+
+```python
+get_google_login_url()
+get_google_access_token(code)
+get_google_user_info(access_token)
+```
+
+전체 흐름:
+
+```text
+/auth/google/login
+        ↓
+Google 로그인 페이지
+        ↓
+authorization code
+        ↓
+/auth/google/callback
+        ↓
+Google access token
+        ↓
+Google 사용자 정보
+        ↓
+social_accounts 확인
+        ↓
+User 생성 또는 기존 User 연결
+        ↓
+Trip Planner JWT 발급
+```
+
+최종적으로 Google 토큰을 직접 사용하는 것이 아니라:
+
+```python
+create_access_token(user.id)
+```
+
+으로 Trip Planner 자체 JWT를 발급한다.
+
+
+# Kakao SNS 로그인
+
+## Kakao Developers 설정
+
+사용한 값:
+
+```text
+REST API Key
+Client Secret
+Redirect URI
+```
+Client Secret은 외부에 노출하면 안 되므로 `.env`에 저장한다.
+
+Redirect URI:
+
+```text
+http://localhost:8000/auth/kakao/callback
+```
+
+---
+
+## Kakao OAuth Service
+
+파일:
+
+```text
+backend/services/kakao_oauth.py
+```
+
+주요 함수:
+
+```python
+get_kakao_login_url()
+get_kakao_access_token(code)
+get_kakao_user_info(access_token)
+```
+
+흐름:
+
+```text
+카카오 로그인
+      ↓
+authorization code
+      ↓
+Kakao Token API
+      ↓
+Kakao access token
+      ↓
+Kakao UserInfo API
+      ↓
+Kakao 사용자 ID
+```
+
+로그인 API:
+
+```text
+GET /auth/kakao/login
+GET /auth/kakao/callback
+```
+
+---
+
+## 9. 카카오 이메일 권한 문제
+
+처음에는 카카오 계정 이메일을 사용하려 했다.
+
+```python
+kakao_account = kakao_user.get("kakao_account", {})
+email = kakao_account.get("email")
+```
+
+하지만 현재 앱에서는 이메일 동의항목이 `권한 없음` 상태여서 이메일을 받을 수 없었다.
+
+따라서 이메일 없이 카카오 고유 ID를 사용하도록 변경했다.
+
+```python
+provider_user_id = str(kakao_user["id"])
+```
+
+`social_accounts`:
+
+```text
+provider = "kakao"
+provider_user_id = Kakao 사용자 고유 ID
+```
+
+---
+
+## users.email nullable 처리
+
+카카오 로그인에서 이메일을 받지 못할 수 있으므로:
+
+기존:
+
+```python
+email: Mapped[str] = mapped_column(
+    String(255),
+    unique=True,
+    nullable=False,
+    index=True,
+)
+```
+
+변경:
+
+```python
+email: Mapped[str | None] = mapped_column(
+    String(255),
+    unique=True,
+    nullable=True,
+    index=True,
+)
+```
+
+`UserResponse`도:
+
+```python
+email: EmailStr | None
+```
+
+로 변경한다.
+
+일반 회원가입의 `UserCreate`에서는 여전히 이메일을 필수로 유지한다.
+
+---
+
+## SocialAccount의 역할
+
+```text
+users
+   │
+   └── social_accounts
+```
+
+Google:
+
+```text
+provider = "google"
+provider_user_id = Google sub
+```
+
+Kakao:
+
+```text
+provider = "kakao"
+provider_user_id = Kakao user id
+```
+
+외부 로그인 공급자가 달라도 최종적으로 모두 하나의 `User`와 연결한다.
+
+---
+
+# 오늘 완성된 로그인 구조
+
+```text
+                Trip Planner
+
+       ┌────────────┼────────────┐
+       │            │            │
+       ▼            ▼            ▼
+
+ Email Login    Google Login   Kakao Login
+       │            │            │
+       ▼            ▼            ▼
+
+ password       Google sub     Kakao ID
+       │            │            │
+       └────────────┼────────────┘
+                    │
+                    ▼
+
+                   User
+                    │
+                    ▼
+
+          Trip Planner JWT 발급
+                    │
+                    ▼
+
+            get_current_user()
+                    │
+                    ▼
+
+          보호된 API 사용 가능
+                    │
+                    ▼
+
+                 /trips
+```
+
+로그인 방법은 달라도 최종 인증 방식은 모두 Trip Planner JWT로 통일된다.
+
+---
+
+# 보안 및 추후 개선사항
+
+현재 Google 로그인에서 `state`를 생성하지만 callback에서 실제 검증하는 부분은 추후 보강이 필요하다.
+
+OAuth `state`는 로그인 요청과 callback 요청이 같은 흐름인지 확인하고 CSRF 공격 방어에 사용한다.
+
+개발 중 사용한 디버깅 출력:
+
+```python
+print("KAKAO STATUS:", response.status_code)
+print("KAKAO ERROR:", response.text)
+```
+
+은 운영 전 제거한다.
+
+`.env`에 포함되는 비밀 정보는 GitHub에 올리지 않는다.
+
+```text
+DATABASE_URL
+SMTP_PASSWORD
+JWT_SECRET_KEY
+GOOGLE_CLIENT_SECRET
+KAKAO_CLIENT_SECRET
+```
+
+`.gitignore`:
+
+```gitignore
+.env
+venv/
+__pycache__/
+.pytest_cache/
+```
+
+---
+

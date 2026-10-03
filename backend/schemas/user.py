@@ -10,7 +10,7 @@ class UserCreate(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
-    email: EmailStr
+    email: EmailStr | None
     email_verified: bool
     created_at: datetime
 

@@ -21,3 +21,9 @@ class TripResponse(BaseModel):
     model_config = {
         "from_attributes": True
     }
+
+class TripUpdate(BaseModel):
+    title: str 
+    destination: str 
+    start_date: date 
+    end_date: date 

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
 from backend.models import Trip, User
-from backend.schemas.trip import TripCreate, TripResponse
+from backend.schemas.trip import TripCreate, TripResponse, TripUpdate
 
 
 router = APIRouter(
@@ -53,3 +53,85 @@ def get_my_trips(
     )
 
     return trips
+
+@router.get(
+    "/{trip_id}",
+    response_model=TripResponse,
+)
+def get_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id, Trip.user_id == current_user.id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found",
+        )
+
+    return trip
+
+
+@router.put(
+    "/{trip_id}",
+    response_model=TripResponse,
+)
+def update_trip(
+    trip_id: int,
+    trip_update: TripUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id, Trip.user_id == current_user.id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found",
+        )
+
+    trip.title = trip_update.title
+    trip.destination = trip_update.destination
+    trip.start_date = trip_update.start_date
+    trip.end_date = trip_update.end_date
+
+    db.commit()
+    db.refresh(trip)
+
+    return trip
+
+@router.delete(
+    "/{trip_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id, Trip.user_id == current_user.id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found",
+        )
+
+    db.delete(trip)
+    db.commit()
+
+    return None
