@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -21,8 +21,16 @@ class User(Base):
         index=True
     )
 
-    password_hash: Mapped[str] = mapped_column(
+    # 일반 이메일/비밀번호 로그인 사용자가 아니면 NULL 가능
+    password_hash: Mapped[str | None] = mapped_column(
         String(255),
+        nullable=True
+    )
+
+    # 이메일 인증 여부
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
         nullable=False
     )
 
@@ -37,6 +45,58 @@ class User(Base):
         cascade="all, delete-orphan"
     )
 
+    social_accounts: Mapped[list["SocialAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    
+    email_verifications: Mapped[list["EmailVerification"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
+
+class SocialAccount(Base):
+    __tablename__ = "social_accounts"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_user_id",
+            name="uq_social_provider_user"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False
+    )
+
+    provider_user_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="social_accounts"
+    )
 
 class Trip(Base):
     __tablename__ = "trips"
@@ -80,4 +140,43 @@ class Trip(Base):
 
     user: Mapped["User"] = relationship(
         back_populates="trips"
+    )
+
+class EmailVerification(Base):
+    __tablename__ = "email_verifications"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True
+    )
+
+    code_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False
+    )
+
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="email_verifications"
     )
