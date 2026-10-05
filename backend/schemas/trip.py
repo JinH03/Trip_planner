@@ -1,7 +1,7 @@
 from datetime import date, datetime
 
 from pydantic import BaseModel
-
+from backend.schemas.trip_day import TripDayWithSchedules
 
 class TripCreate(BaseModel):
     title: str
@@ -27,3 +27,14 @@ class TripUpdate(BaseModel):
     destination: str 
     start_date: date 
     end_date: date 
+
+class TripDetailResponse(BaseModel):
+    id: int
+    title: str
+    destination: str
+    start_date: date
+    end_date: date
+    created_at: datetime
+    days: list[TripDayWithSchedules]
+
+    model_config = {"from_attributes": True}

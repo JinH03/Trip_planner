@@ -724,3 +724,207 @@ __pycache__/
 
 ---
 
+# TripCS - Day 4
+
+## 오늘 목표
+
+오늘은 여행 일정의 상세 구조를 만들었다.
+
+전체 구조:
+
+User
+↓
+Trip
+↓
+TripDay
+↓
+Schedule
+
+즉 하나의 여행 안에 여러 날짜가 있고,
+각 날짜 안에 여러 일정이 들어가는 구조다.
+
+오늘 구현한 핵심 기능:
+
+- `TripDay` 모델 및 API
+- `Schedule` 모델 및 CRUD API
+- TripDay 날짜 범위 검증
+- 같은 Trip 안에서 `day_number` 중복 방지
+- Schedule `start_time`을 문자열에서 PostgreSQL `TIME` 타입으로 변경
+- Schedule 순서 재정렬 API
+- Trip 상세 조회 시 Day + Schedule까지 한 번에 반환
+- `joinedload()`를 이용한 관계 데이터 조회
+- 주요 오류 해결 및 Alembic migration 수정
+
+## 1. TripDay / Schedule 모델 추가
+
+TripDay는 여행의 하루를 의미한다.
+
+예:
+
+Trip: 오사카 여행
+
+- Day 1: 2026-10-05
+- Day 2: 2026-10-06
+- Day 3: 2026-10-07
+
+
+Schedule은 각 날짜 안의 실제 일정을 의미한다.
+
+예:
+
+Day 1
+
+- 09:00 오사카성
+- 12:00 점심
+- 15:00 도톤보리
+
+
+## 2. 관계 구조
+
+Trip
+
+```python
+days: Mapped[list["TripDay"]] = relationship(
+    back_populates="trip",
+    cascade="all, delete-orphan",
+)
+```
+
+## 3. TripDay API
+
+구현한 API:
+
+```text
+POST   /trips/{trip_id}/days
+GET    /trips/{trip_id}/days
+PUT    /trips/{trip_id}/days/{trip_day_id}
+DELETE /trips/{trip_id}/days/{trip_day_id}
+```
+
+## 4. TripDay 날짜 검증
+
+TripDay 날짜는 반드시 Trip의 시작일과 종료일 사이에 있어야 한다.
+
+```python
+if not (
+    trip.start_date <= trip_day.date <= trip.end_date
+):
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Trip day date must be within trip dates",
+    )
+```
+
+## 5. Schedule CRUD
+
+구현한 Schedule API:
+
+```text
+POST   /trip-days/{trip_day_id}/schedules
+GET    /trip-days/{trip_day_id}/schedules
+GET    /trip-days/{trip_day_id}/schedules/{schedule_id}
+PUT    /trip-days/{trip_day_id}/schedules/{schedule_id}
+DELETE /trip-days/{trip_day_id}/schedules/{schedule_id}
+```
+
+## 6. schedule_map
+
+Schedule을 ID 기준으로 빠르게 찾기 위해 dictionary를 만들었다.
+
+```python
+schedule_map = {
+    schedule.id: schedule
+    for schedule in schedules
+}
+```
+예:
+
+```python
+{
+    1: Schedule(...),
+    2: Schedule(...),
+    3: Schedule(...),
+}
+```
+
+이후:
+
+```python
+schedule = schedule_map[item.schedule_id]
+```
+
+처럼 바로 접근할 수 있다.
+
+
+---
+
+## 7. Trip 상세 전체 조회
+
+기존에는 데이터를 여러 번 요청해야 했다.
+
+```text
+GET /trips/{trip_id}
+GET /trips/{trip_id}/days
+GET /trip-days/{trip_day_id}/schedules
+```
+
+이제는:
+
+```text
+GET /trips/{trip_id}/detail
+```
+
+한 번으로 다음 구조를 받을 수 있다.
+
+```text
+Trip
+├── Day 1
+│   ├── Schedule
+│   └── Schedule
+└── Day 2
+    └── Schedule
+```
+
+---
+
+## 8. N+1 문제
+
+연관 데이터를 하나씩 접근할 때 추가 SQL이 반복 실행될 수 있다.
+
+예:
+
+```text
+Trip 조회
+→ Day 조회
+→ Day마다 Schedule 조회
+→ Schedule 조회 반복
+```
+
+이런 문제를 N+1 문제라고 한다.
+
+이번에는 `joinedload()`를 사용해서 관련 데이터를 함께 로딩하도록 했다.
+
+
+---
+
+## 9. Day / Schedule 정렬
+
+Day는 `day_number` 기준으로 정렬했다.
+
+```python
+trip.days.sort(
+    key=lambda day: day.day_number
+)
+```
+
+Schedule은 `order_index` 기준으로 정렬했다.
+
+```python
+for day in trip.days:
+    day.schedules.sort(
+        key=lambda schedule: schedule.order_index
+    )
+```
+
+
+---

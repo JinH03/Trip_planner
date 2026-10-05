@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, time
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Time, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -140,6 +140,94 @@ class Trip(Base):
 
     user: Mapped["User"] = relationship(
         back_populates="trips"
+    )
+    days: Mapped[list["TripDay"]] = relationship(
+        back_populates="trip",
+        cascade="all, delete-orphan",
+    )
+class TripDay(Base):
+    __tablename__ = "trip_days"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
+
+    trip_id: Mapped[int] = mapped_column(
+        ForeignKey("trips.id"),
+        nullable=False,
+        index=True,
+    )
+
+    day_number: Mapped[int] = mapped_column(
+        nullable=False,
+    )
+
+    date: Mapped[datetime] = mapped_column(
+        Date,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    trip: Mapped["Trip"] = relationship(
+        back_populates="days",
+    )
+    schedules: Mapped[list["Schedule"]] = relationship(
+        back_populates="trip_day",
+        cascade="all, delete-orphan",
+    )
+class Schedule(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
+
+    trip_day_id: Mapped[int] = mapped_column(
+        ForeignKey("trip_days.id"),
+        nullable=False,
+        index=True,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    start_time: Mapped[time | None] = mapped_column(
+        Time,
+        nullable=True,
+    )
+
+    place: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    memo: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    order_index: Mapped[int] = mapped_column(
+        default=0,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    trip_day: Mapped["TripDay"] = relationship(
+        back_populates="schedules",
     )
 
 class EmailVerification(Base):

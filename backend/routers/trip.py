@@ -3,10 +3,15 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
-from backend.models import Trip, User
+from backend.models import Trip, User, TripDay
 from backend.schemas.trip import TripCreate, TripResponse, TripUpdate
-
-
+from sqlalchemy.orm import joinedload
+from backend.schemas.trip import (
+    TripCreate,
+    TripUpdate,
+    TripResponse,
+    TripDetailResponse,
+)
 router = APIRouter(
     prefix="/trips",
     tags=["trips"],
@@ -76,8 +81,43 @@ def get_trip(
         )
 
     return trip
+@router.get(
+    "/{trip_id}/detail",
+    response_model=TripDetailResponse,
+)
+def get_trip_detail(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .options(
+            joinedload(Trip.days).joinedload(TripDay.schedules)
+        )
+        .filter(
+            Trip.id == trip_id,
+            Trip.user_id == current_user.id,
+        )
+        .first()
+    )
 
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found",
+        )
 
+    trip.days.sort(
+        key=lambda day: day.day_number
+    )
+
+    for day in trip.days:
+        day.schedules.sort(
+            key=lambda schedule: schedule.order_index
+        )
+
+    return trip
 @router.put(
     "/{trip_id}",
     response_model=TripResponse,
