@@ -1,6 +1,6 @@
 from datetime import datetime, time
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ScheduleCreate(BaseModel):
@@ -34,7 +34,7 @@ class ScheduleResponse(BaseModel):
     }
 class ScheduleOrderItem(BaseModel):
     schedule_id: int
-    order_index: int
+    order_index: int = Field(ge= 0)
 
 
 class ScheduleReorderRequest(BaseModel):

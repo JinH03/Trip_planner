@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-
+from datetime import timedelta
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
 from backend.models import Trip, User, TripDay
@@ -28,6 +28,11 @@ def create_trip(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if trip.end_date < trip.start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="End date must be on or after start date",
+        )
     new_trip = Trip(
         user_id=current_user.id,
         title=trip.title,
@@ -39,7 +44,15 @@ def create_trip(
     db.add(new_trip)
     db.commit()
     db.refresh(new_trip)
-
+    total_days = (new_trip.end_date - new_trip.start_date).days+1
+    for i in range(total_days):
+        trip_day = TripDay(
+            trip_id=new_trip.id,
+            day_number=i + 1,
+            date=new_trip.start_date + timedelta(days=i),
+        )
+        db.add(trip_day)
+    db.commit()
     return new_trip
 
 
@@ -114,7 +127,11 @@ def get_trip_detail(
 
     for day in trip.days:
         day.schedules.sort(
-            key=lambda schedule: schedule.order_index
+            key=lambda schedule: (
+                schedule.order_index,
+                schedule.start_time is None,
+                schedule.start_time,
+            )
         )
 
     return trip
@@ -139,11 +156,32 @@ def update_trip(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Trip not found",
         )
-
+    if trip_update.end_date < trip_update.start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="End date must be on or after start date",
+        )
     trip.title = trip_update.title
     trip.destination = trip_update.destination
     trip.start_date = trip_update.start_date
     trip.end_date = trip_update.end_date
+    total_days = (trip_update.end_date - trip_update.start_date).days + 1
+    existing_days = (db.query(TripDay).filter(TripDay.trip_id == trip.id).order_by(TripDay.day_number).all())
+    for i in range(min(len(existing_days), total_days)):
+        existing_days[i].day_number = i + 1
+        existing_days[i].date = trip_update.start_date + timedelta(days=i)
+    if total_days > len(existing_days):
+        for i in range(len(existing_days), total_days):
+            new_day = TripDay(
+                trip_id = trip.id,
+                day_number = i + 1,
+                date = trip_update.start_date + timedelta(days=i),
+            )
+            db.add(new_day)
+    elif total_days < len(existing_days):
+        extra_days = existing_days[total_days:]
+        for day in extra_days:
+            db.delete(day)
 
     db.commit()
     db.refresh(trip)

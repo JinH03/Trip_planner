@@ -928,3 +928,202 @@ for day in trip.days:
 
 
 ---
+
+# TripCS - Day5
+
+## 오늘의 목표
+
+Day 5에서는 Trip과 TripDay의 자동 동기화, Schedule 정렬 개선, 권한 검사 리팩토링, reorder 검증 강화를 진행했다.
+
+오늘 구현한 핵심 기능:
+
+- Trip 생성 시 TripDay 자동 생성
+- Trip 수정 시 TripDay 자동 추가/삭제
+- Schedule 정렬 기준 개선
+- ownership helper 분리
+- `get_owned_trip()`
+- `get_owned_trip_day()`
+- `get_owned_schedule()`
+- reorder 요청 검증 강화
+- 중복 `schedule_id` 방지
+- 중복 `order_index` 방지
+- 음수 `order_index` 방지
+
+---
+
+
+## 1. Ownership 코드 리팩토링
+
+반복되는 소유권 검사를 다음 파일로 분리했다.
+
+```text
+backend/dependencies/ownership.py
+```
+
+### get_owned_trip()
+
+```python
+def get_owned_trip(
+    db: Session,
+    trip_id: int,
+    user_id: int,
+) -> Trip:
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.user_id == user_id,
+        )
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found",
+        )
+
+    return trip
+```
+
+### get_owned_trip_day()
+
+```python
+def get_owned_trip_day(
+    db: Session,
+    trip_day_id: int,
+    user_id: int,
+) -> TripDay:
+    trip_day = (
+        db.query(TripDay)
+        .join(Trip)
+        .filter(
+            TripDay.id == trip_day_id,
+            Trip.user_id == user_id,
+        )
+        .first()
+    )
+
+    if not trip_day:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip day not found",
+        )
+
+    return trip_day
+```
+
+### get_owned_schedule()
+
+```python
+def get_owned_schedule(
+    db: Session,
+    trip_day_id: int,
+    schedule_id: int,
+    user_id: int,
+) -> Schedule:
+    schedule = (
+        db.query(Schedule)
+        .join(TripDay)
+        .join(Trip)
+        .filter(
+            Schedule.id == schedule_id,
+            Schedule.trip_day_id == trip_day_id,
+            Trip.user_id == user_id,
+        )
+        .first()
+    )
+
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule not found",
+        )
+
+    return schedule
+```
+
+리팩토링 장점:
+
+- 코드 중복 감소
+- 권한 검사 로직 통합
+- 라우터 가독성 향상
+- 유지보수성 개선
+
+---
+
+## 2. Schedule reorder 검증 강화
+
+다음 검증을 추가했다.
+
+```text
+중복 schedule_id
+중복 order_index
+음수 order_index
+잘못된 schedule_id
+```
+
+### 음수 order_index 방지
+
+```python
+from pydantic import BaseModel, Field
+```
+
+```python
+class ScheduleOrderItem(BaseModel):
+    schedule_id: int
+    order_index: int = Field(ge=0)
+```
+
+`ge=0`은 0 이상만 허용한다는 뜻이다.
+
+### schedule_id 중복 검사
+
+```python
+schedule_ids = [
+    item.schedule_id
+    for item in request.schedules
+]
+
+if len(schedule_ids) != len(set(schedule_ids)):
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Duplicate schedule_id is not allowed",
+    )
+```
+
+### order_index 중복 검사
+
+```python
+order_indexes = [
+    item.order_index
+    for item in request.schedules
+]
+
+if len(order_indexes) != len(set(order_indexes)):
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Duplicate order_index is not allowed",
+    )
+```
+
+### 현재 TripDay에 속한 Schedule인지 검증
+
+```python
+schedules = (
+    db.query(Schedule)
+    .filter(
+        Schedule.trip_day_id == trip_day.id,
+        Schedule.id.in_(schedule_ids),
+    )
+    .all()
+)
+
+if len(schedules) != len(schedule_ids):
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="One or more schedules are invalid",
+    )
+```
+
+---

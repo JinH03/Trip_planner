@@ -3,7 +3,11 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
-from backend.models import Schedule, Trip, TripDay, User
+from backend.dependencies.ownership import (
+    get_owned_schedule,
+    get_owned_trip_day,
+)
+from backend.models import Schedule, User
 from backend.schemas.schedule import (
     ScheduleCreate,
     ScheduleResponse,
@@ -29,21 +33,11 @@ def create_schedule(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    trip_day = (
-        db.query(TripDay)
-        .join(Trip)
-        .filter(
-            TripDay.id == trip_day_id,
-            Trip.user_id == current_user.id,
-        )
-        .first()
+    trip_day = get_owned_trip_day(
+        db=db,
+        trip_day_id=trip_day_id,
+        user_id=current_user.id,
     )
-
-    if not trip_day:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip day not found",
-        )
 
     new_schedule = Schedule(
         trip_day_id=trip_day.id,
@@ -70,60 +64,26 @@ def get_schedules(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    trip_day = (
-        db.query(TripDay)
-        .join(Trip)
-        .filter(
-            TripDay.id == trip_day_id,
-            Trip.user_id == current_user.id,
-        )
-        .first()
+    trip_day = get_owned_trip_day(
+        db=db,
+        trip_day_id=trip_day_id,
+        user_id=current_user.id,
     )
-
-    if not trip_day:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip day not found",
-        )
 
     schedules = (
         db.query(Schedule)
-        .filter(Schedule.trip_day_id == trip_day.id)
-        .order_by(Schedule.order_index)
+        .filter(
+            Schedule.trip_day_id == trip_day.id
+        )
+        .order_by(
+            Schedule.order_index,
+            Schedule.start_time,
+        )
         .all()
     )
 
     return schedules
 
-@router.get(
-    "/{schedule_id}",
-    response_model=ScheduleResponse,
-)
-def get_schedule(
-    trip_day_id: int,
-    schedule_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    schedule = (
-        db.query(Schedule)
-        .join(TripDay)
-        .join(Trip)
-        .filter(
-            Schedule.id == schedule_id,
-            Schedule.trip_day_id == trip_day_id,
-            Trip.user_id == current_user.id,
-        )
-        .first()
-    )
-
-    if not schedule:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Schedule not found",
-        )
-
-    return schedule
 
 @router.put(
     "/reorder",
@@ -135,26 +95,35 @@ def reorder_schedules(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    trip_day = (
-        db.query(TripDay)
-        .join(Trip)
-        .filter(
-            TripDay.id == trip_day_id,
-            Trip.user_id == current_user.id,
-        )
-        .first()
+    trip_day = get_owned_trip_day(
+        db=db,
+        trip_day_id=trip_day_id,
+        user_id=current_user.id,
     )
-
-    if not trip_day:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip day not found",
-        )
 
     schedule_ids = [
         item.schedule_id
         for item in request.schedules
     ]
+
+    # 같은 schedule_id가 두 번 들어오는 것 방지
+    if len(schedule_ids) != len(set(schedule_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Duplicate schedule_id is not allowed",
+        )
+
+    order_indexes = [
+        item.order_index
+        for item in request.schedules
+    ]
+
+    # 같은 order_index가 중복되는 것 방지
+    if len(order_indexes) != len(set(order_indexes)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Duplicate order_index is not allowed",
+        )
 
     schedules = (
         db.query(Schedule)
@@ -165,6 +134,8 @@ def reorder_schedules(
         .all()
     )
 
+    # 다른 TripDay의 schedule_id가 섞였거나
+    # 존재하지 않는 schedule_id가 들어온 경우
     if len(schedules) != len(schedule_ids):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -187,17 +158,40 @@ def reorder_schedules(
         .filter(
             Schedule.trip_day_id == trip_day.id
         )
-        .order_by(Schedule.order_index)
+        .order_by(
+            Schedule.order_index,
+            Schedule.start_time,
+        )
         .all()
     )
 
     return updated_schedules
 
+
+@router.get(
+    "/{schedule_id}",
+    response_model=ScheduleResponse,
+)
+def get_schedule(
+    trip_day_id: int,
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    schedule = get_owned_schedule(
+        db=db,
+        trip_day_id=trip_day_id,
+        schedule_id=schedule_id,
+        user_id=current_user.id,
+    )
+
+    return schedule
+
+
 @router.put(
     "/{schedule_id}",
     response_model=ScheduleResponse,
 )
-
 def update_schedule(
     trip_day_id: int,
     schedule_id: int,
@@ -205,23 +199,12 @@ def update_schedule(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    schedule = (
-        db.query(Schedule)
-        .join(TripDay)
-        .join(Trip)
-        .filter(
-            Schedule.id == schedule_id,
-            Schedule.trip_day_id == trip_day_id,
-            Trip.user_id == current_user.id,
-        )
-        .first()
+    schedule = get_owned_schedule(
+        db=db,
+        trip_day_id=trip_day_id,
+        schedule_id=schedule_id,
+        user_id=current_user.id,
     )
-
-    if not schedule:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Schedule not found",
-        )
 
     schedule.title = schedule_update.title
     schedule.start_time = schedule_update.start_time
@@ -234,6 +217,7 @@ def update_schedule(
 
     return schedule
 
+
 @router.delete(
     "/{schedule_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -244,23 +228,12 @@ def delete_schedule(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    schedule = (
-        db.query(Schedule)
-        .join(TripDay)
-        .join(Trip)
-        .filter(
-            Schedule.id == schedule_id,
-            Schedule.trip_day_id == trip_day_id,
-            Trip.user_id == current_user.id,
-        )
-        .first()
+    schedule = get_owned_schedule(
+        db=db,
+        trip_day_id=trip_day_id,
+        schedule_id=schedule_id,
+        user_id=current_user.id,
     )
-
-    if not schedule:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Schedule not found",
-        )
 
     db.delete(schedule)
     db.commit()
