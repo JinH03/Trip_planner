@@ -1,10 +1,23 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
 from backend.schemas.schedule import ScheduleResponse
 
+
 class TripDayCreate(BaseModel):
-    day_number: int
+    day_number: int = Field(
+        ge=1,
+    )
+
+    date: date
+
+
+class TripDayUpdate(BaseModel):
+    day_number: int = Field(
+        ge=1,
+    )
+
     date: date
 
 
@@ -19,9 +32,6 @@ class TripDayResponse(BaseModel):
         "from_attributes": True
     }
 
-class TripDayUpdate(BaseModel):
-    day_number: int
-    date: date
 
 class TripDayWithSchedules(BaseModel):
     id: int
@@ -31,4 +41,6 @@ class TripDayWithSchedules(BaseModel):
     created_at: datetime
     schedules: list[ScheduleResponse]
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True
+    }

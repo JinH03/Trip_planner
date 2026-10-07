@@ -1,17 +1,23 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from datetime import timedelta
+from sqlalchemy.orm import Session, joinedload
+
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
-from backend.models import Trip, User, TripDay
-from backend.schemas.trip import TripCreate, TripResponse, TripUpdate
-from sqlalchemy.orm import joinedload
+from backend.dependencies.ownership import get_owned_trip
+from backend.models import Trip, TripDay, User
 from backend.schemas.trip import (
     TripCreate,
-    TripUpdate,
-    TripResponse,
     TripDetailResponse,
+    TripResponse,
+    TripUpdate,
 )
+from backend.services.trip import (
+    create_trip_with_days,
+    delete_trip_service,
+    update_trip_with_days,
+)
+
+
 router = APIRouter(
     prefix="/trips",
     tags=["trips"],
@@ -28,32 +34,11 @@ def create_trip(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if trip.end_date < trip.start_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="End date must be on or after start date",
-        )
-    new_trip = Trip(
-        user_id=current_user.id,
-        title=trip.title,
-        destination=trip.destination,
-        start_date=trip.start_date,
-        end_date=trip.end_date,
+    return create_trip_with_days(
+        db=db,
+        trip_data=trip,
+        current_user=current_user,
     )
-
-    db.add(new_trip)
-    db.commit()
-    db.refresh(new_trip)
-    total_days = (new_trip.end_date - new_trip.start_date).days+1
-    for i in range(total_days):
-        trip_day = TripDay(
-            trip_id=new_trip.id,
-            day_number=i + 1,
-            date=new_trip.start_date + timedelta(days=i),
-        )
-        db.add(trip_day)
-    db.commit()
-    return new_trip
 
 
 @router.get(
@@ -66,34 +51,15 @@ def get_my_trips(
 ):
     trips = (
         db.query(Trip)
-        .filter(Trip.user_id == current_user.id)
+        .filter(
+            Trip.user_id == current_user.id
+        )
         .all()
     )
 
     return trips
 
-@router.get(
-    "/{trip_id}",
-    response_model=TripResponse,
-)
-def get_trip(
-    trip_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    trip = (
-        db.query(Trip)
-        .filter(Trip.id == trip_id, Trip.user_id == current_user.id)
-        .first()
-    )
 
-    if not trip:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip not found",
-        )
-
-    return trip
 @router.get(
     "/{trip_id}/detail",
     response_model=TripDetailResponse,
@@ -106,7 +72,8 @@ def get_trip_detail(
     trip = (
         db.query(Trip)
         .options(
-            joinedload(Trip.days).joinedload(TripDay.schedules)
+            joinedload(Trip.days)
+            .joinedload(TripDay.schedules)
         )
         .filter(
             Trip.id == trip_id,
@@ -135,6 +102,24 @@ def get_trip_detail(
         )
 
     return trip
+
+
+@router.get(
+    "/{trip_id}",
+    response_model=TripResponse,
+)
+def get_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return get_owned_trip(
+        db=db,
+        trip_id=trip_id,
+        user_id=current_user.id,
+    )
+
+
 @router.put(
     "/{trip_id}",
     response_model=TripResponse,
@@ -145,48 +130,18 @@ def update_trip(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    trip = (
-        db.query(Trip)
-        .filter(Trip.id == trip_id, Trip.user_id == current_user.id)
-        .first()
+    trip = get_owned_trip(
+        db=db,
+        trip_id=trip_id,
+        user_id=current_user.id,
     )
 
-    if not trip:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip not found",
-        )
-    if trip_update.end_date < trip_update.start_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="End date must be on or after start date",
-        )
-    trip.title = trip_update.title
-    trip.destination = trip_update.destination
-    trip.start_date = trip_update.start_date
-    trip.end_date = trip_update.end_date
-    total_days = (trip_update.end_date - trip_update.start_date).days + 1
-    existing_days = (db.query(TripDay).filter(TripDay.trip_id == trip.id).order_by(TripDay.day_number).all())
-    for i in range(min(len(existing_days), total_days)):
-        existing_days[i].day_number = i + 1
-        existing_days[i].date = trip_update.start_date + timedelta(days=i)
-    if total_days > len(existing_days):
-        for i in range(len(existing_days), total_days):
-            new_day = TripDay(
-                trip_id = trip.id,
-                day_number = i + 1,
-                date = trip_update.start_date + timedelta(days=i),
-            )
-            db.add(new_day)
-    elif total_days < len(existing_days):
-        extra_days = existing_days[total_days:]
-        for day in extra_days:
-            db.delete(day)
+    return update_trip_with_days(
+        db=db,
+        trip=trip,
+        trip_data=trip_update,
+    )
 
-    db.commit()
-    db.refresh(trip)
-
-    return trip
 
 @router.delete(
     "/{trip_id}",
@@ -197,19 +152,13 @@ def delete_trip(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    trip = (
-        db.query(Trip)
-        .filter(Trip.id == trip_id, Trip.user_id == current_user.id)
-        .first()
+    trip = get_owned_trip(
+        db=db,
+        trip_id=trip_id,
+        user_id=current_user.id,
     )
 
-    if not trip:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip not found",
-        )
-
-    db.delete(trip)
-    db.commit()
-
-    return None
+    delete_trip_service(
+        db=db,
+        trip=trip,
+    )

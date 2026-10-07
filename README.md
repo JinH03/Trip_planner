@@ -1127,3 +1127,187 @@ if len(schedules) != len(schedule_ids):
 ```
 
 ---
+
+# TripCS - Day 6
+
+## 1. 오늘 목표
+
+Day 6에서는 기존에 잘 동작하던 기능을 더 유지보수하기 좋은 구조로 리팩토링하고,
+입력 검증과 트랜잭션 처리를 강화했다.
+
+핵심 목표:
+
+```text
+Router
+↓
+Ownership
+↓
+Service
+↓
+DB
+```
+
+그리고 입력 검증은 Schema가 담당하도록 역할을 분리했다.
+
+```text
+Schema
+↓
+입력값 검증
+```
+
+오늘 구현한 핵심 내용:
+
+- Trip 비즈니스 로직을 `services/trip.py`로 분리
+- Schedule 비즈니스 로직을 `services/schedule.py`로 분리
+- Router를 얇게 정리
+- Service에서 `commit / rollback` 처리
+- `db.flush()`를 이용한 하나의 트랜잭션 처리
+- Trip / TripDay / Schedule Schema 검증 강화
+- 공백 문자열 방지
+- 길이 제한
+- 양수 / 0 이상 숫자 검증
+- reorder 빈 리스트 방지
+- HTTP 상태 코드 기준 정리
+
+
+---
+
+## 2. Router와 Service 역할 분리
+
+기존에는 Router 안에서 다음 작업을 모두 처리했다.
+
+```text
+요청 받기
+인증
+소유권 검사
+비즈니스 로직
+DB 생성/수정/삭제
+commit
+rollback
+응답
+```
+
+Day 6부터는 역할을 분리했다.
+
+### Router 역할
+
+```text
+요청 받기
+↓
+로그인 사용자 확인
+↓
+Ownership 확인
+↓
+Service 호출
+↓
+응답 반환
+```
+
+### Service 역할
+
+```text
+비즈니스 로직
+↓
+DB 변경
+↓
+commit
+↓
+실패 시 rollback
+```
+
+이 구조로 변경하면서 Router 코드가 훨씬 짧고 읽기 쉬워졌다.
+
+
+---
+
+## 3. Trip Service 구조
+
+파일:
+
+```text
+backend/services/trip.py
+```
+
+현재 주요 함수:
+
+```text
+create_trip_with_days()
+update_trip_with_days()
+delete_trip_service()
+```
+---
+
+## 3. db.flush()를 사용하는 이유
+
+기존에는 Trip 생성 직후 `commit()`을 하고 TripDay를 만들 수 있었다.
+
+하지만 그렇게 하면:
+
+```text
+Trip commit 성공
+↓
+TripDay 생성 중 실패
+```
+
+상황에서 Trip만 DB에 남을 수 있다.
+
+그래서 Day 6에서는:
+
+```python
+db.add(new_trip)
+db.flush()
+```
+
+를 사용했다.
+
+`flush()`는:
+
+```text
+INSERT 내용을 DB에 보내서 new_trip.id 확보
+하지만 아직 transaction 확정은 아님
+```
+
+상태다.
+
+이후 TripDay까지 전부 만든 뒤:
+
+```python
+db.commit()
+```
+
+을 한 번만 실행한다.
+
+즉:
+
+```text
+Trip 생성
++
+TripDay 생성
+=
+하나의 transaction
+```
+
+
+---
+
+---
+
+## 4. Schedule Service 분리
+
+파일:
+
+```text
+backend/services/schedule.py
+```
+
+주요 함수:
+
+```text
+create_schedule_service()
+update_schedule_service()
+delete_schedule_service()
+reorder_schedules_service()
+```
+
+
+---
