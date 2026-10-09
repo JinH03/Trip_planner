@@ -1311,3 +1311,232 @@ reorder_schedules_service()
 
 
 ---
+
+
+# TripCS - Day 7
+
+## 1. 오늘 목표
+
+Day 7에서는 Swagger로 직접 확인하던 기능 테스트를 `pytest`로 자동화했다.
+
+핵심 흐름:
+
+```text
+기능 구현
+↓
+pytest 실행
+↓
+기존 기능이 깨졌는지 자동 확인
+```
+
+오늘 테스트한 범위:
+
+- 인증 없이 `/trips` 접근
+- 회원가입 / 로그인 / JWT
+- Trip 생성
+- TripDay 자동 생성
+- Trip 수정 시 TripDay 증가 / 감소
+- Schedule 생성 / 수정 / 삭제
+- Schedule reorder
+- Pydantic validation
+- Ownership
+- Trip validation
+
+---
+
+## 2. 테스트 폴더 구조
+
+```text
+trip_planner/
+├── backend/
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── test_auth.py
+│   ├── test_trip.py
+│   ├── test_schedule.py
+│   └── test_ownership.py
+└── ...
+```
+pytest 자동 탐색 기본 규칙:
+
+```text
+파일 → test_*.py
+함수 → test_...
+```
+
+---
+
+## 3. conftest.py 역할
+
+`conftest.py`는 여러 테스트에서 공통으로 사용하는 fixture를 정의하는 파일이다.
+
+주요 역할:
+
+```text
+테스트용 DB 준비
+↓
+FastAPI DB 의존성 교체
+↓
+TestClient 준비
+↓
+테스트마다 DB 초기화
+↓
+인증된 사용자 준비
+```
+
+## 4. 테스트용 SQLite DB
+
+실제 TripCS는 PostgreSQL을 사용하지만 테스트에서는 SQLite를 사용했다.
+
+```python
+TEST_DATABASE_URL = "sqlite://"
+```
+
+테스트 DB를 분리하는 이유:
+
+- 실제 데이터 보호
+- 테스트 속도 향상
+- 테스트마다 DB 초기화하기 쉬움
+
+---
+
+## 5. 테스트 DB Engine
+
+```python
+engine = create_engine(
+    TEST_DATABASE_URL,
+    connect_args={
+        "check_same_thread": False
+    },
+    poolclass=StaticPool,
+)
+```
+
+`check_same_thread=False`는 FastAPI `TestClient`가 다른 thread에서 요청을 처리할 수 있기 때문에 SQLite 연결을 다른 thread에서도 사용할 수 있도록 허용한다.
+
+`StaticPool`은 메모리 SQLite 연결을 테스트 중 계속 재사용하도록 한다.
+
+---
+
+## 6. TestingSessionLocal
+
+```python
+TestingSessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+```
+
+실제 DB의 `SessionLocal` 대신 테스트에서 사용할 세션 생성기다.
+
+---
+
+## 7. FastAPI DB Dependency Override
+
+실제 API:
+
+```python
+db: Session = Depends(get_db)
+```
+
+테스트에서는:
+
+```python
+app.dependency_overrides[get_db] = override_get_db
+```
+
+로 교체했다.
+
+```text
+실제 서버
+Depends(get_db)
+↓
+PostgreSQL
+```
+
+```text
+pytest
+Depends(get_db)
+↓
+override_get_db()
+↓
+SQLite 테스트 DB
+```
+
+---
+
+## 8. TestClient
+
+```python
+@pytest.fixture
+def client():
+    with TestClient(app) as test_client:
+        yield test_client
+```
+
+Swagger 대신 Python 코드에서 API를 호출할 수 있다.
+
+예:
+
+```python
+response = client.get("/trips")
+```
+
+---
+
+## 9. fixture란?
+
+pytest fixture는 테스트에서 반복적으로 필요한 준비물을 제공한다.
+
+예:
+
+```python
+@pytest.fixture
+def client():
+    ...
+```
+
+테스트에서는:
+
+```python
+def test_something(client):
+```
+
+처럼 매개변수 이름만 작성하면 pytest가 자동으로 fixture를 넣어준다.
+
+---
+
+## 10. 테스트마다 DB 초기화
+
+중복 이메일 문제를 해결하기 위해 테스트마다 DB를 초기화했다.
+
+```python
+@pytest.fixture(autouse=True)
+def reset_database():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    yield
+
+    Base.metadata.drop_all(bind=engine)
+```
+
+`autouse=True`는 모든 테스트에 자동 적용된다는 뜻이다.
+
+```text
+테스트 시작
+↓
+DB 초기화
+↓
+테스트 실행
+↓
+테스트 종료
+↓
+DB 삭제
+```
+
+이 덕분에 테스트끼리 데이터가 서로 영향을 주지 않는다.
+
+---
