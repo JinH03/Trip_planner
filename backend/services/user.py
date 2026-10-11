@@ -3,14 +3,15 @@ import bcrypt
 from sqlalchemy.orm import Session
 
 from backend.models import User
-from backend.services.email_verification import create_verification_code
 
 
 def hash_password(password: str) -> str:
     password_bytes = password.encode("utf-8")
 
     if len(password_bytes) > 72:
-        raise ValueError("Password must be 72 bytes or less")
+        raise ValueError(
+            "Password must be 72 bytes or less"
+        )
 
     return bcrypt.hashpw(
         password_bytes,
@@ -35,14 +36,18 @@ def create_user(
 ):
     existing_user = (
         db.query(User)
-        .filter(User.email == email)
+        .filter(
+            User.email == email
+        )
         .first()
     )
 
     if existing_user:
         return None
 
-    password_hash = hash_password(password)
+    password_hash = hash_password(
+        password
+    )
 
     new_user = User(
         email=email,
@@ -53,16 +58,5 @@ def create_user(
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-
-    code = create_verification_code(
-        new_user.id,
-        db,
-    )
-
-    # 현재는 실제 이메일 발송 전이므로 테스트용
-    print(
-        f"[EMAIL VERIFICATION] "
-        f"{email} -> {code}"
-    )
 
     return new_user

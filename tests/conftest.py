@@ -1,13 +1,14 @@
 import pytest
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from fastapi.testclient import TestClient
 
 from backend.database import Base, get_db
 from backend.main import app
 from backend.models import User
+from backend.services.auth import create_access_token
 
 
 TEST_DATABASE_URL = "sqlite://"
@@ -16,7 +17,7 @@ TEST_DATABASE_URL = "sqlite://"
 engine = create_engine(
     TEST_DATABASE_URL,
     connect_args={
-        "check_same_thread": False
+        "check_same_thread": False,
     },
     poolclass=StaticPool,
 )
@@ -69,128 +70,52 @@ def db():
         database.close()
 
 
-@pytest.fixture
-def auth_headers(client, db):
-    email = "test@example.com"
-    password = "test1234"
-
-    signup_response = client.post(
-        "/users",
-        json={
-            "email": email,
-            "password": password,
-        },
+def create_test_user(
+    db,
+    email: str,
+) -> User:
+    user = User(
+        email=email,
+        password_hash=None,
+        email_verified=True,
     )
 
-    assert signup_response.status_code in [200, 201]
-
-    user = (
-        db.query(User)
-        .filter(User.email == email)
-        .first()
-    )
-
-    assert user is not None
-
-    user.email_verified = True
+    db.add(user)
     db.commit()
+    db.refresh(user)
 
-    login_response = client.post(
-        "/auth/login",
-        json={
-            "email": email,
-            "password": password,
-        },
+    return user
+
+
+def create_auth_headers(
+    db,
+    email: str,
+) -> dict:
+    user = create_test_user(
+        db=db,
+        email=email,
     )
 
-    assert login_response.status_code == 200
-
-    access_token = login_response.json()["access_token"]
+    access_token = create_access_token(
+        user.id
+    )
 
     return {
         "Authorization": f"Bearer {access_token}"
     }
 
-@pytest.fixture
-def second_auth_headers(client, db):
-    email = "second@example.com"
-    password = "test1234"
-
-    signup_response = client.post(
-        "/users",
-        json={
-            "email": email,
-            "password": password,
-        },
-    )
-
-    assert signup_response.status_code in [200, 201]
-
-    user = (
-        db.query(User)
-        .filter(User.email == email)
-        .first()
-    )
-
-    assert user is not None
-
-    user.email_verified = True
-    db.commit()
-
-    login_response = client.post(
-        "/auth/login",
-        json={
-            "email": email,
-            "password": password,
-        },
-    )
-
-    assert login_response.status_code == 200
-
-    access_token = login_response.json()["access_token"]
-
-    return {
-        "Authorization": f"Bearer {access_token}"
-    }
 
 @pytest.fixture
-def second_auth_headers(client, db):
-    email = "second@example.com"
-    password = "test1234"
-
-    signup_response = client.post(
-        "/users",
-        json={
-            "email": email,
-            "password": password,
-        },
+def auth_headers(db):
+    return create_auth_headers(
+        db=db,
+        email="test@example.com",
     )
 
-    assert signup_response.status_code in [200, 201]
 
-    user = (
-        db.query(User)
-        .filter(User.email == email)
-        .first()
+@pytest.fixture
+def second_auth_headers(db):
+    return create_auth_headers(
+        db=db,
+        email="second@example.com",
     )
-
-    assert user is not None
-
-    user.email_verified = True
-    db.commit()
-
-    login_response = client.post(
-        "/auth/login",
-        json={
-            "email": email,
-            "password": password,
-        },
-    )
-
-    assert login_response.status_code == 200
-
-    access_token = login_response.json()["access_token"]
-
-    return {
-        "Authorization": f"Bearer {access_token}"
-    }

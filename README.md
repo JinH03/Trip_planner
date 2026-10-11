@@ -1540,3 +1540,283 @@ DB 삭제
 이 덕분에 테스트끼리 데이터가 서로 영향을 주지 않는다.
 
 ---
+
+
+# TripCS - Day 8
+
+## 1. 오늘 목표
+
+Day 8에서는 새 기능 추가보다 기존 코드의 기술부채와 warning을 정리하고 테스트 구조를 개선했다.
+
+핵심 작업:
+
+- Pydantic v2 deprecated warning 제거
+- `datetime.utcnow()` warning 제거
+- `utc_now()` 공통 유틸 추가
+- 이메일 인증코드 2번 생성 버그 수정
+- 테스트 fixture 중복 제거
+- `auth_headers` / `second_auth_headers` 최적화
+- 테스트 속도 개선
+- 전체 회귀 테스트 확인
+- 최종 `23 passed, 1 warning`
+
+---
+
+## 2. Pydantic v2 warning 정리
+
+기존:
+
+```python
+class Config:
+    from_attributes = True
+```
+
+변경:
+
+```python
+model_config = {
+    "from_attributes": True
+}
+```
+
+Pydantic v2에서는 `class Config` 방식보다 `model_config` 사용을 권장한다.
+
+---
+
+## 3. datetime.utcnow() warning 정리
+
+Python 3.14에서:
+
+```python
+datetime.utcnow()
+```
+
+사용 시 deprecation warning이 발생했다.
+
+그래서 공통 시간 유틸을 만들었다.
+
+파일:
+
+```text
+backend/utils/time.py
+```
+
+```python
+from datetime import UTC, datetime
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+```
+
+현재 DB의 `DateTime` 컬럼이 timezone 없는 구조이므로,
+UTC 기준 시간을 만든 뒤 timezone 정보만 제거해서 기존 구조와 맞췄다.
+
+---
+
+## 4. SQLAlchemy default 변경
+
+기존:
+
+```python
+default=datetime.utcnow
+```
+
+변경:
+
+```python
+default=utc_now
+```
+
+중요:
+
+```python
+default=utc_now
+```
+
+처럼 함수 자체를 넘겨야 한다.
+
+```python
+default=utc_now()
+```
+
+처럼 괄호를 붙이면 import 시점에 바로 실행될 수 있다.
+
+---
+
+## 5. 이메일 인증 만료시간도 변경
+
+기존:
+
+```python
+expires_at=datetime.utcnow() + timedelta(minutes=10)
+```
+
+변경:
+
+```python
+expires_at=utc_now() + timedelta(minutes=10)
+```
+
+만료 검사:
+
+```python
+if verification.expires_at < utc_now():
+    return False
+```
+
+인증 성공 시간:
+
+```python
+verification.verified_at = utc_now()
+```
+
+---
+
+## 6. 이메일 인증코드 2번 생성 버그
+
+회원가입 한 번에 인증코드가 두 번 생성되는 문제가 있었다.
+
+원인:
+
+```text
+register_user()
+↓
+create_user()
+    ↓
+    create_verification_code()  ← 1번
+
+register_user()
+↓
+create_verification_code()      ← 2번
+```
+
+즉 `services/user.py`와 `routers/user.py` 양쪽에서 인증코드를 생성하고 있었다.
+
+---
+
+## 7. create_user() 역할 정리
+
+`create_user()`는 사용자 생성만 담당하도록 변경했다.
+
+최종 역할:
+
+```text
+이메일 중복 확인
+↓
+비밀번호 hash
+↓
+User 생성
+↓
+commit
+↓
+User 반환
+```
+
+인증코드 생성과 이메일 발송은 회원가입 Router에서 한 번만 수행하도록 정리했다.
+
+---
+
+## 8. 최종 회원가입 흐름
+
+```text
+POST /users
+↓
+create_user()
+↓
+User 생성
+↓
+create_verification_code()
+↓
+send_verification_email()
+↓
+완료
+```
+
+인증코드는 이제 한 번만 생성된다.
+
+---
+## 9. 테스트 warning 정리 결과
+
+기존에는 Pydantic / datetime 관련 warning이 많이 발생했다.
+
+정리 후:
+
+```text
+23 passed
+1 warning
+```
+
+남은 warning:
+
+```text
+StarletteDeprecationWarning:
+Using httpx with starlette.testclient is deprecated
+```
+
+현재 TripCS 로직 문제는 아니고 TestClient 의존성 관련 warning이므로 known warning으로 남겨두었다.
+
+---
+
+## 10. 기존 테스트 fixture 문제
+
+기존 `auth_headers`는 테스트마다 실제 회원가입과 로그인을 수행했다.
+
+흐름:
+
+```text
+회원가입 API
+↓
+bcrypt hash
+↓
+인증코드 생성
+↓
+이메일 발송
+↓
+email_verified=True
+↓
+로그인 API
+↓
+비밀번호 검증
+↓
+JWT
+```
+
+Trip / Schedule 테스트마다 이 과정을 반복하면서 테스트 속도가 느려졌다.
+
+---
+
+## 11. 테스트 목적 분리
+
+```text
+test_auth.py
+→ 실제 인증 기능 테스트
+
+test_trip.py
+test_schedule.py
+test_ownership.py
+→ 인증된 상태만 필요
+```
+
+따라서 인증 기능 자체는 `test_auth.py`에서 실제 흐름으로 테스트하고,
+다른 테스트는 빠르게 인증 상태만 준비하도록 변경했다.
+
+---
+## 12. Day 8 핵심 개념
+
+오늘 배운 내용:
+
+- deprecated warning 정리
+- Pydantic v2 설정 방식
+- `datetime.now(UTC)`
+- 공통 시간 유틸
+- SQLAlchemy default callable
+- 중복 호출 디버깅
+- 함수 역할 분리
+- 테스트 fixture 최적화
+- 테스트 helper 분리
+- 테스트 목적 분리
+- 테스트 속도 개선
+- 회귀 테스트
+
+---

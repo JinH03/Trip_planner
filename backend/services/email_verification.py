@@ -1,7 +1,7 @@
 import hashlib
 import secrets
-from datetime import datetime, timedelta
-
+from datetime import timedelta
+from backend.utils.time import utc_now
 from sqlalchemy.orm import Session
 
 from backend.models import EmailVerification
@@ -22,7 +22,7 @@ def create_verification_code(
     verification = EmailVerification(
         user_id=user_id,
         code_hash=code_hash,
-        expires_at=datetime.utcnow() + timedelta(minutes=10),
+        expires_at=utc_now() + timedelta(minutes=10),
     )
 
     db.add(verification)
@@ -57,10 +57,10 @@ def verify_code(
         return False
 
     # 10분 만료
-    if verification.expires_at < datetime.utcnow():
+    if verification.expires_at < utc_now():
         return False
 
-    verification.verified_at = datetime.utcnow()
+    verification.verified_at = utc_now()
 
     db.commit()
 
