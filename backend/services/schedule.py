@@ -1,7 +1,6 @@
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
-
-from backend.models import Schedule, TripDay
+from backend.models import Place, Schedule, TripDay
 from backend.schemas.schedule import (
     ScheduleCreate,
     ScheduleReorderRequest,
@@ -14,11 +13,27 @@ def create_schedule_service(
     trip_day: TripDay,
     schedule_data: ScheduleCreate,
 ) -> Schedule:
+    if schedule_data.place_id is not None:
+        place = (
+            db.query(Place)
+            .filter(
+                Place.id == schedule_data.place_id
+            )
+            .first()
+        )
+
+        if not place:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid place_id",
+            )
+
     new_schedule = Schedule(
         trip_day_id=trip_day.id,
         title=schedule_data.title,
         start_time=schedule_data.start_time,
         place=schedule_data.place,
+        place_id=schedule_data.place_id,
         memo=schedule_data.memo,
         order_index=schedule_data.order_index,
     )
@@ -40,10 +55,26 @@ def update_schedule_service(
     schedule: Schedule,
     schedule_data: ScheduleUpdate,
 ) -> Schedule:
+    if schedule_data.place_id is not None:
+        place = (
+            db.query(Place)
+            .filter(
+                Place.id == schedule_data.place_id
+            )
+            .first()
+        )
+
+        if not place:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid place_id",
+            )
+
     try:
         schedule.title = schedule_data.title
         schedule.start_time = schedule_data.start_time
         schedule.place = schedule_data.place
+        schedule.place_id = schedule_data.place_id
         schedule.memo = schedule_data.memo
         schedule.order_index = schedule_data.order_index
 

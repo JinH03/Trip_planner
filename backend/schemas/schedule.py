@@ -2,6 +2,8 @@ from datetime import datetime, time
 
 from pydantic import BaseModel, Field, field_validator
 
+from backend.schemas.place import PlaceResponse
+
 
 class ScheduleCreate(BaseModel):
     title: str = Field(
@@ -14,6 +16,11 @@ class ScheduleCreate(BaseModel):
     place: str | None = Field(
         default=None,
         max_length=200,
+    )
+
+    place_id: int | None = Field(
+        default=None,
+        gt=0,
     )
 
     memo: str | None = Field(
@@ -52,6 +59,11 @@ class ScheduleUpdate(BaseModel):
         max_length=200,
     )
 
+    place_id: int | None = Field(
+        default=None,
+        gt=0,
+    )
+
     memo: str | None = Field(
         default=None,
         max_length=500,
@@ -78,10 +90,11 @@ class ScheduleUpdate(BaseModel):
 class ScheduleResponse(BaseModel):
     id: int
     trip_day_id: int
-
     title: str
     start_time: time | None
     place: str | None
+    place_id: int | None
+    place_info: PlaceResponse | None
     memo: str | None
     order_index: int
     created_at: datetime

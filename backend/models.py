@@ -5,7 +5,16 @@ from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Time, Unique
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
-
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    String,
+    Time,
+    UniqueConstraint,
+)
 
 class User(Base):
     __tablename__ = "users"
@@ -196,6 +205,12 @@ class Schedule(Base):
         index=True,
     )
 
+    place_id: Mapped[int | None] = mapped_column(
+        ForeignKey("places.id"),
+        nullable=True,
+        index=True,
+    )
+
     title: Mapped[str] = mapped_column(
         String(200),
         nullable=False,
@@ -230,6 +245,9 @@ class Schedule(Base):
     trip_day: Mapped["TripDay"] = relationship(
         back_populates="schedules",
     )
+
+    place_info: Mapped["Place | None"] = relationship()
+
 
 class EmailVerification(Base):
     __tablename__ = "email_verifications"
@@ -268,4 +286,47 @@ class EmailVerification(Base):
 
     user: Mapped["User"] = relationship(
         back_populates="email_verifications"
+    )
+
+class Place(Base):
+    __tablename__ = "places"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    address: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
+    latitude: Mapped[float | None] = mapped_column(
+        nullable=True,
+    )
+
+    longitude: Mapped[float | None] = mapped_column(
+        nullable=True,
+    )
+
+    category: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    external_place_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utc_now,
+        nullable=False,
     )

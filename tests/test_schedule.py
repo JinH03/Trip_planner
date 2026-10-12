@@ -365,3 +365,176 @@ def test_reorder_empty_schedules(
     )
 
     assert response.status_code == 422
+
+def create_test_place(client):
+    response = client.post(
+        "/places",
+        json={
+            "name": "오사카성",
+            "address": "1-1 Osakajo, Chuo Ward, Osaka",
+            "latitude": 34.6873,
+            "longitude": 135.5262,
+            "category": "관광지",
+            "external_place_id": "test-osaka-castle",
+        },
+    )
+
+    assert response.status_code == 201
+
+    return response.json()
+def test_create_schedule_with_place(
+    client,
+    auth_headers,
+):
+    trip_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+
+    assert trip_response.status_code == 201
+
+    trip_id = trip_response.json()["id"]
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    assert detail_response.status_code == 200
+
+    trip_day_id = detail_response.json()["days"][0]["id"]
+
+    place = create_test_place(client)
+
+    response = client.post(
+        f"/trip-days/{trip_day_id}/schedules",
+        headers=auth_headers,
+        json={
+            "title": "오사카성 관광",
+            "start_time": "10:00:00",
+            "place": "오사카성",
+            "place_id": place["id"],
+            "memo": "사진 찍기",
+            "order_index": 0,
+        },
+    )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["title"] == "오사카성 관광"
+    assert data["place_id"] == place["id"]
+
+    assert data["place_info"] is not None
+    assert data["place_info"]["id"] == place["id"]
+    assert data["place_info"]["name"] == "오사카성"
+def test_create_schedule_with_invalid_place_id(
+    client,
+    auth_headers,
+):
+    trip_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+
+    assert trip_response.status_code == 201
+
+    trip_id = trip_response.json()["id"]
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    trip_day_id = detail_response.json()["days"][0]["id"]
+
+    response = client.post(
+        f"/trip-days/{trip_day_id}/schedules",
+        headers=auth_headers,
+        json={
+            "title": "없는 장소 테스트",
+            "start_time": "10:00:00",
+            "place": "없는 장소",
+            "place_id": 999999,
+            "memo": None,
+            "order_index": 0,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid place_id"
+
+def test_trip_detail_contains_schedule_place_info(
+    client,
+    auth_headers,
+):
+    trip_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+
+    assert trip_response.status_code == 201
+
+    trip_id = trip_response.json()["id"]
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    assert detail_response.status_code == 200
+
+    trip_day_id = detail_response.json()["days"][0]["id"]
+
+    place = create_test_place(client)
+
+    schedule_response = client.post(
+        f"/trip-days/{trip_day_id}/schedules",
+        headers=auth_headers,
+        json={
+            "title": "오사카성 관광",
+            "start_time": "10:00:00",
+            "place": "오사카성",
+            "place_id": place["id"],
+            "memo": None,
+            "order_index": 0,
+        },
+    )
+
+    assert schedule_response.status_code == 201
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    assert detail_response.status_code == 200
+
+    data = detail_response.json()
+
+    schedule = data["days"][0]["schedules"][0]
+
+    assert schedule["place_id"] == place["id"]
+
+    assert schedule["place_info"] is not None
+    assert schedule["place_info"]["id"] == place["id"]
+    assert schedule["place_info"]["name"] == "오사카성"
