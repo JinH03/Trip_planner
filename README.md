@@ -1820,3 +1820,476 @@ test_ownership.py
 - 회귀 테스트
 
 ---
+
+# TripCS Day 9 - Place 기능과 Schedule 연결
+
+## 1. 오늘 목표
+
+Day 9에서는 여행 일정에 실제 장소 정보를 연결할 수 있도록 `Place` 기능을 추가했다.
+
+- `Place` 모델 추가
+- 장소 검색 API 추가
+- 장소 저장 API 추가
+- `Schedule`과 `Place` 연결
+- `ScheduleResponse`에서 `place_info` 반환
+- 잘못된 `place_id` 검증
+- Alembic migration 적용
+- Place/Schedule 연결 테스트 작성
+- 전체 테스트 통과 확인
+
+## 2. Place 모델
+
+`backend/models.py`
+
+```python
+class Place(Base):
+    __tablename__ = "places"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    address: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    external_place_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utc_now,
+        nullable=False,
+    )
+```
+
+## 3. Schedule과 Place 연결
+
+기존 `Schedule.place` 문자열 필드는 유지하고, 새로 `place_id`를 추가했다.
+
+```python
+place_id: Mapped[int | None] = mapped_column(
+    ForeignKey("places.id"),
+    nullable=True,
+    index=True,
+)
+
+place_info: Mapped["Place | None"] = relationship()
+```
+
+구조:
+
+```text
+Schedule
+├── place        # 기존 문자열 장소명
+├── place_id     # places.id FK
+└── place_info   # 실제 Place 객체
+```
+## 4. Place Schema
+
+`backend/schemas/place.py`
+
+```python
+class PlaceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    address: str | None = Field(default=None, max_length=300)
+    latitude: float | None = None
+    longitude: float | None = None
+    category: str | None = Field(default=None, max_length=100)
+    external_place_id: str | None = Field(default=None, max_length=255)
+
+
+class PlaceResponse(BaseModel):
+    id: int
+    name: str
+    address: str | None
+    latitude: float | None
+    longitude: float | None
+    category: str | None
+    external_place_id: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+```
+
+## 5. Place 검색/저장 API
+
+현재 실제 지도 API 연동 전 단계라 dummy 검색 데이터를 사용한다.
+
+```text
+GET  /places/search
+POST /places
+```
+
+검색 흐름:
+
+```text
+사용자 검색
+↓
+GET /places/search
+↓
+dummy 결과 반환
+↓
+사용자가 장소 선택
+↓
+POST /places
+↓
+DB 저장
+```
+
+같은 `external_place_id`가 이미 존재하면 새 Place를 만들지 않고 기존 데이터를 재사용한다.
+
+## 6. Schedule Schema에 place_id 추가
+
+`ScheduleCreate`, `ScheduleUpdate`에 추가:
+
+```python
+place_id: int | None = Field(
+    default=None,
+    gt=0,
+)
+```
+
+처음에는 `ScheduleCreate`가 파일 안에 두 번 정의되어 있었기 때문에 중복 정의를 제거하고 하나로 정리했다.
+
+## 7. ScheduleResponse에 place_info 추가
+
+```python
+class ScheduleResponse(BaseModel):
+    id: int
+    trip_day_id: int
+    title: str
+    start_time: time | None
+    place: str | None
+    place_id: int | None
+    place_info: PlaceResponse | None
+    memo: str | None
+    order_index: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+```
+
+응답 예시:
+
+```json
+{
+  "id": 1,
+  "trip_day_id": 7,
+  "title": "오사카성 관광",
+  "place": "오사카성",
+  "place_id": 1,
+  "place_info": {
+    "id": 1,
+    "name": "오사카성",
+    "address": "1-1 Osakajo, Chuo Ward, Osaka",
+    "latitude": 34.6873,
+    "longitude": 135.5262,
+    "category": "관광지",
+    "external_place_id": "test-osaka-castle"
+  }
+}
+```
+
+## 8. place_id 검증
+
+Schedule 생성/수정 시 실제 Place가 존재하는지 확인한다.
+
+```python
+if schedule_data.place_id is not None:
+    place = (
+        db.query(Place)
+        .filter(Place.id == schedule_data.place_id)
+        .first()
+    )
+
+    if not place:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid place_id",
+        )
+```
+
+없는 Place id를 넣으면:
+
+```text
+400 Bad Request
+Invalid place_id
+```
+
+를 반환한다.
+
+# TripCS Day 10 - Google Places API (New) 연동
+
+## 1. 오늘 목표
+
+Day 10에서는 Day 9에서 만든 dummy 장소 검색을 실제 Google Places API (New)로 교체했다.
+
+오늘 핵심 목표:
+
+```text
+dummy 장소 검색
+→ 실제 Google Places 검색
+```
+
+완료한 작업:
+
+- 기존 Google Cloud 프로젝트 `tipplanner` 사용
+- Google 로그인용 OAuth 자격증명과 Places API Key 구분
+- Places API (New) 활성화
+- API Key 발급 및 제한 설정
+- `.env`에 Places API Key 저장
+- Google Places Text Search API 연동
+- Google 응답을 `PlaceSearchResult`로 변환
+- 500 / 502 / 403 / 400 에러 디버깅
+- 실제 검색 200 응답 확인
+- 외부 API 호출 테스트를 mock으로 교체
+- 전체 pytest 통과
+
+---
+
+## 2. Google OAuth와 Places API Key 차이
+
+기존 Google 로그인에서 사용하던 값:
+
+```env
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+```
+
+이 값들은 Google OAuth 로그인용이다.
+
+```text
+Google 로그인
+→ OAuth
+→ 사용자 인증
+```
+
+Places API는 별도의 API Key를 사용한다.
+
+```env
+GOOGLE_PLACES_API_KEY=...
+```
+
+즉 구조는 다음과 같다.
+
+```text
+tipplanner Google Cloud Project
+├── OAuth Client ID / Secret
+│   └── Google 로그인용
+│
+└── API Key
+    └── Google Places API용
+```
+
+프로젝트는 같이 사용해도 되지만 자격증명 용도는 다르다.
+
+---
+
+## 3. .env 설정
+
+프로젝트 루트의 `.env`에 추가:
+
+```env
+GOOGLE_PLACES_API_KEY=실제_API_KEY
+```
+
+API Key를 코드에 직접 작성하면 안 된다.
+
+```python
+import os
+
+GOOGLE_PLACES_API_KEY = os.getenv(
+    "GOOGLE_PLACES_API_KEY"
+)
+```
+
+`.env` 수정 후에는 서버를 재시작한다.
+
+```bash
+Ctrl + C
+uvicorn backend.main:app --reload
+```
+
+---
+
+## 4. Google Places Text Search API
+
+사용한 엔드포인트:
+
+```text
+POST https://places.googleapis.com/v1/places:searchText
+```
+
+Request Header:
+
+```text
+Content-Type: application/json
+X-Goog-Api-Key: GOOGLE_PLACES_API_KEY
+X-Goog-FieldMask:
+    places.id,
+    places.displayName,
+    places.formattedAddress,
+    places.location,
+    places.primaryType
+```
+
+Request Body:
+
+```json
+{
+  "textQuery": "오사카성"
+}
+```
+
+---
+
+## 5. Google 응답 → TripCS 데이터 매핑
+
+```text
+places.id
+→ external_place_id
+
+places.displayName.text
+→ name
+
+places.formattedAddress
+→ address
+
+places.location.latitude
+→ latitude
+
+places.location.longitude
+→ longitude
+
+places.primaryType
+→ category
+```
+
+기존 `PlaceSearchResult` 구조를 그대로 활용했다.
+
+---
+## 6. 현재 검색 흐름
+
+```text
+사용자
+↓
+GET /places/search?query=오사카성
+↓
+TripCS
+↓
+search_places_service()
+↓
+Google Places Text Search
+↓
+PlaceSearchResult 변환
+↓
+검색 결과 반환
+```
+
+장소 선택 이후:
+
+```text
+POST /places
+↓
+Place DB 저장
+↓
+place_id 획득
+↓
+Schedule.place_id 연결
+↓
+Trip detail
+↓
+place_info 반환
+```
+
+---
+
+## 7. 외부 API 테스트는 Mock 사용
+
+테스트마다 실제 Google을 호출하면:
+
+```text
+느려짐
+네트워크 영향
+API Key 필요
+쿼터/비용 영향
+외부 장애 영향
+```
+
+이 생길 수 있다.
+
+그래서:
+
+```python
+@patch(
+    "backend.services.place.httpx.post"
+)
+```
+
+를 사용해 실제 HTTP 요청 대신 가짜 Google 응답을 반환하도록 했다.
+
+예시:
+
+```python
+mock_post.return_value.json.return_value = {
+    "places": [
+        {
+            "id": "ChIJ_test_osaka_castle",
+            "formattedAddress": (
+                "1-1 Osakajo, Chuo Ward, Osaka, Japan"
+            ),
+            "location": {
+                "latitude": 34.6872571,
+                "longitude": 135.5258546,
+            },
+            "displayName": {
+                "text": "Osaka Castle",
+                "languageCode": "en",
+            },
+            "primaryType": "castle",
+        }
+    ]
+}
+
+mock_post.return_value.raise_for_status.return_value = None
+```
+
+---
+
+## 8. API Key도 테스트용으로 Patch
+
+테스트 환경에서 실제 API Key가 없어도 되도록:
+
+```python
+from backend.services import place as place_service
+
+
+with patch.object(
+    place_service,
+    "GOOGLE_PLACES_API_KEY",
+    "test-api-key",
+):
+    response = client.get(
+        "/places/search",
+        params={
+            "query": "오사카성",
+        },
+    )
+```
+
+로 처리했다.
+
+즉 테스트에서는:
+
+```text
+실제 Google API 호출 X
+실제 API Key X
+
+mock 응답 O
+test-api-key O
+```
+
+---
