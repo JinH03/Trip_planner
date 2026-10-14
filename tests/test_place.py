@@ -131,3 +131,117 @@ def test_search_places_empty_result(mock_post, client):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+@patch("backend.services.place.httpx.post")
+def test_search_places_with_location_bias(
+    mock_post,
+    client,
+):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_post.return_value.json.return_value = {
+        "places": []
+    }
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        response = client.get(
+            "/places/search",
+            params={
+                "query": "스타벅스",
+                "latitude": 34.6937,
+                "longitude": 135.5023,
+            },
+        )
+
+    assert response.status_code == 200
+
+    _, kwargs = mock_post.call_args
+
+    body = kwargs["json"]
+
+    assert body["textQuery"] == "스타벅스"
+    assert body["languageCode"] == "ko"
+    assert body["pageSize"] == 5
+
+    assert body["locationBias"]["circle"]["center"]["latitude"] == 34.6937
+    assert body["locationBias"]["circle"]["center"]["longitude"] == 135.5023
+    assert body["locationBias"]["circle"]["radius"] == 10000.0
+
+@patch("backend.services.place.httpx.post")
+def test_search_places_without_location_bias(
+    mock_post,
+    client,
+):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_post.return_value.json.return_value = {
+        "places": []
+    }
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        response = client.get(
+            "/places/search",
+            params={
+                "query": "스타벅스",
+            },
+        )
+
+    assert response.status_code == 200
+
+    _, kwargs = mock_post.call_args
+
+    body = kwargs["json"]
+
+    assert "locationBias" not in body
+
+def test_create_place_with_blank_name(client):
+    response = client.post(
+        "/places",
+        json={
+            "name": "   ",
+            "address": "test address",
+            "latitude": 34.6873,
+            "longitude": 135.5262,
+            "category": "castle",
+            "external_place_id": "blank-name-test",
+        },
+    )
+
+    assert response.status_code == 422
+def test_create_place_with_invalid_latitude(client):
+    response = client.post(
+        "/places",
+        json={
+            "name": "오사카성",
+            "address": "test address",
+            "latitude": 91,
+            "longitude": 135.5262,
+            "category": "castle",
+            "external_place_id": "invalid-latitude-test",
+        },
+    )
+
+    assert response.status_code == 422
+def test_create_place_with_invalid_longitude(client):
+    response = client.post(
+        "/places",
+        json={
+            "name": "오사카성",
+            "address": "test address",
+            "latitude": 34.6873,
+            "longitude": 181,
+            "category": "castle",
+            "external_place_id": "invalid-longitude-test",
+        },
+    )
+
+    assert response.status_code == 422

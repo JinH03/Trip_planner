@@ -28,8 +28,22 @@ def search_places(
         min_length=1,
         max_length=100,
     ),
+    latitude: float | None = Query(
+        default= None,
+        ge = -90,
+        le=90,
+    ),
+    longitude: float | None = Query(
+        default=None,
+        ge=-180,
+        le=180,
+    ),
 ):
-    return search_places_service(query)
+    return search_places_service(
+        query=query,
+        latitude=latitude,
+        longitude=longitude,
+    )
 
 
 @router.post(

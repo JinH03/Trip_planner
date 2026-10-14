@@ -26,6 +26,8 @@ GOOGLE_PLACES_SEARCH_URL = (
 
 def search_places_service(
     query: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> list[PlaceSearchResult]:
 
     query = query.strip()
@@ -53,8 +55,19 @@ def search_places_service(
 
     body = {
         "textQuery": query,
+        "languageCode": "ko",
+        "pageSize": 5
     }
-
+    if latitude is not None and longitude is not None:
+        body["locationBias"] = {
+            "circle": {
+                "center": {
+                    "latitude": latitude,
+                    "longitude": longitude,
+                },
+                "radius": 10000.0,
+            }
+        }
     try:
         response = httpx.post(
             GOOGLE_PLACES_SEARCH_URL,
@@ -82,7 +95,7 @@ def search_places_service(
     places = data.get(
         "places",
         [],
-    )
+    )[:5]
 
     results = []
 

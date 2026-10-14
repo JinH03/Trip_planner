@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
 from backend.dependencies.ownership import get_owned_trip
-from backend.models import Trip, TripDay, User
+from backend.models import Trip, TripDay, User, Schedule
 from backend.schemas.trip import (
     TripCreate,
     TripDetailResponse,
@@ -74,6 +74,7 @@ def get_trip_detail(
         .options(
             joinedload(Trip.days)
             .joinedload(TripDay.schedules)
+            .joinedload(Schedule.place_info)
         )
         .filter(
             Trip.id == trip_id,
@@ -81,7 +82,6 @@ def get_trip_detail(
         )
         .first()
     )
-
     if not trip:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
