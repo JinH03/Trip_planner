@@ -2293,3 +2293,131 @@ test-api-key O
 ```
 
 ---
+
+# TripCS Day 11 - Google Places 개선
+
+## 1. 오늘 목표
+
+Day 11에서는 Day 10에서 연결한 Google Places 검색을 실제 서비스에서 쓰기 더 좋게 다듬었다.
+
+오늘 핵심 목표:
+
+```text
+Google Places 연결
+→ 사용자 친화적인 장소 검색으로 개선
+```
+
+완료한 작업:
+
+- 검색 결과 한국어 우선
+- 검색 결과 최대 5개 제한
+- 서버에서도 `[:5]`로 한 번 더 제한
+- 선택적으로 latitude / longitude 받기
+- `locationBias`로 특정 위치 주변 검색 우선
+- 좌표가 없어도 기존 검색 유지
+- locationBias 유무 테스트 추가
+- Place 이름 공백 validation
+- latitude / longitude 범위 validation
+- validation 테스트 추가
+- Trip detail에서 `place_info` eager loading
+- 전체 pytest 통과
+
+## 2. 한국어 우선 + 결과 5개 제한
+
+```python
+body = {
+    "textQuery": query,
+    "languageCode": "ko",
+    "pageSize": 5,
+}
+```
+
+그리고 서버에서도:
+
+```python
+places = data.get(
+    "places",
+    [],
+)[:5]
+```
+
+로 한 번 더 제한했다.
+
+## 3. 위치 기반 검색 준비
+
+```python
+def search_places_service(
+    query: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> list[PlaceSearchResult]:
+```
+
+좌표가 둘 다 있으면:
+
+```python
+if latitude is not None and longitude is not None:
+    body["locationBias"] = {
+        "circle": {
+            "center": {
+                "latitude": latitude,
+                "longitude": longitude,
+            },
+            "radius": 10000.0,
+        }
+    }
+```
+
+현재 반경은 10km다.
+
+## 4. Router에서 좌표 받기
+
+```python
+@router.get(
+    "/search",
+    response_model=list[PlaceSearchResult],
+)
+def search_places(
+    query: str = Query(
+        min_length=1,
+        max_length=100,
+    ),
+    latitude: float | None = Query(
+        default=None,
+        ge=-90,
+        le=90,
+    ),
+    longitude: float | None = Query(
+        default=None,
+        ge=-180,
+        le=180,
+    ),
+):
+    return search_places_service(
+        query=query,
+        latitude=latitude,
+        longitude=longitude,
+    )
+```
+
+Swagger에서는 직접 좌표를 넣어 테스트하지만, 실제 서비스에서는 사용자가 좌표를 직접 입력하지 않는 방향으로 간다.
+
+## 5. 실제 서비스 UX 방향
+
+사용자는:
+
+```text
+스타벅스
+```
+
+만 검색한다.
+
+프론트 또는 백엔드가 여행 목적지 기준 좌표를 자동으로 붙인다.
+
+```text
+query=스타벅스
+latitude=34.6937
+longitude=135.5023
+```
+
+Day 12에서는 이를 `trip_id` 기반으로 자동화하는 방향을 생각할 수 있다.
