@@ -1,3 +1,8 @@
+from unittest.mock import patch
+
+from backend.services import place as place_service
+
+
 def test_get_trips_without_token(client):
     response = client.get("/trips")
 
@@ -234,3 +239,120 @@ def test_create_trip_with_invalid_date_range(
     )
 
     assert response.status_code == 400
+
+
+@patch("backend.services.place.httpx.post")
+def test_search_places_with_trip_id_uses_destination_bias(
+    mock_post,
+    client,
+    auth_headers,
+):
+    trip_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+
+    assert trip_response.status_code == 201
+
+    trip_id = trip_response.json()["id"]
+
+    mock_post.side_effect = [
+        # 1번째 호출:
+        # destination = "오사카" 좌표 조회
+        type(
+            "MockResponse",
+            (),
+            {
+                "status_code": 200,
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "places": [
+                        {
+                            "location": {
+                                "latitude": 34.6937,
+                                "longitude": 135.5023,
+                            }
+                        }
+                    ]
+                },
+            },
+        )(),
+
+        # 2번째 호출:
+        # 실제 스타벅스 검색
+        type(
+            "MockResponse",
+            (),
+            {
+                "status_code": 200,
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "places": [
+                        {
+                            "id": "test-starbucks-osaka",
+                            "formattedAddress": "Osaka, Japan",
+                            "location": {
+                                "latitude": 34.7000,
+                                "longitude": 135.5000,
+                            },
+                            "displayName": {
+                                "text": "스타벅스 오사카",
+                                "languageCode": "ko",
+                            },
+                            "primaryType": "coffee_shop",
+                        }
+                    ]
+                },
+            },
+        )(),
+    ]
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        response = client.get(
+            "/places/search",
+            headers=auth_headers,
+            params={
+                "query": "스타벅스",
+                "trip_id": trip_id,
+            },
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data) == 1
+    assert data[0]["name"] == "스타벅스 오사카"
+
+    assert mock_post.call_count == 2
+
+    first_call = mock_post.call_args_list[0]
+    first_body = first_call.kwargs["json"]
+
+    assert first_body["textQuery"] == "오사카"
+    assert first_body["pageSize"] == 1
+
+    second_call = mock_post.call_args_list[1]
+    second_body = second_call.kwargs["json"]
+
+    assert second_body["textQuery"] == "스타벅스"
+
+    assert (
+        second_body["locationBias"]["circle"]["center"]["latitude"]
+        == 34.6937
+    )
+
+    assert (
+        second_body["locationBias"]["circle"]["center"]["longitude"]
+        == 135.5023
+    )

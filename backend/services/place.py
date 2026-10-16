@@ -28,6 +28,7 @@ def search_places_service(
     query: str,
     latitude: float | None = None,
     longitude: float | None = None,
+    destination: str | None = None,
 ) -> list[PlaceSearchResult]:
 
     query = query.strip()
@@ -40,6 +41,78 @@ def search_places_service(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Google Places API key is not configured",
         )
+    if (
+        destination
+        and latitude is None
+        and longitude is None
+    ):
+        destination_headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+            "X-Goog-FieldMask": (
+                "places.location"
+            ),
+        }
+
+        destination_body = {
+            "textQuery": destination,
+            "languageCode": "ko",
+            "pageSize": 1,
+        }
+
+        try:
+            destination_response = httpx.post(
+                GOOGLE_PLACES_SEARCH_URL,
+                headers=destination_headers,
+                json=destination_body,
+                timeout=10.0,
+            )
+
+            destination_response.raise_for_status()
+
+        except httpx.HTTPStatusError:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to resolve trip destination",
+            )
+
+        except httpx.RequestError:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to connect while resolving trip destination",
+            )
+
+        destination_data = (
+            destination_response.json()
+        )
+
+        destination_places = (
+            destination_data.get(
+                "places",
+                [],
+            )
+        )
+
+        if destination_places:
+            destination_location = (
+                destination_places[0]
+                .get(
+                    "location",
+                    {},
+                )
+            )
+
+            latitude = (
+                destination_location.get(
+                    "latitude"
+                )
+            )
+
+            longitude = (
+                destination_location.get(
+                    "longitude"
+                )
+            )
 
     headers = {
         "Content-Type": "application/json",
@@ -56,8 +129,9 @@ def search_places_service(
     body = {
         "textQuery": query,
         "languageCode": "ko",
-        "pageSize": 5
+        "pageSize": 5,
     }
+
     if latitude is not None and longitude is not None:
         body["locationBias"] = {
             "circle": {
@@ -68,6 +142,7 @@ def search_places_service(
                 "radius": 10000.0,
             }
         }
+
     try:
         response = httpx.post(
             GOOGLE_PLACES_SEARCH_URL,

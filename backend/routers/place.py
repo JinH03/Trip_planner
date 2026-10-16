@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
+from backend.dependencies.auth import get_current_user
+from backend.dependencies.ownership import get_owned_trip
+from backend.models import User
 from backend.schemas.place import (
     PlaceCreate,
     PlaceResponse,
@@ -28,9 +31,13 @@ def search_places(
         min_length=1,
         max_length=100,
     ),
+    trip_id: int | None = Query(
+        default=None,
+        gt=0,
+    ),
     latitude: float | None = Query(
-        default= None,
-        ge = -90,
+        default=None,
+        ge=-90,
         le=90,
     ),
     longitude: float | None = Query(
@@ -38,11 +45,25 @@ def search_places(
         ge=-180,
         le=180,
     ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    destination = None
+
+    if trip_id is not None:
+        trip = get_owned_trip(
+            db=db,
+            trip_id=trip_id,
+            user_id=current_user.id,
+        )
+
+        destination = trip.destination
+
     return search_places_service(
         query=query,
         latitude=latitude,
         longitude=longitude,
+        destination=destination,
     )
 
 

@@ -55,8 +55,13 @@ def test_create_duplicate_place_returns_existing_place(client):
 
 
 @patch("backend.services.place.httpx.post")
-def test_search_places(mock_post, client):
+def test_search_places(
+    mock_post,
+    client,
+    auth_headers,
+):
     mock_post.return_value.status_code = 200
+    mock_post.return_value.raise_for_status.return_value = None
 
     mock_post.return_value.json.return_value = {
         "places": [
@@ -78,8 +83,6 @@ def test_search_places(mock_post, client):
         ]
     }
 
-    mock_post.return_value.raise_for_status.return_value = None
-
     with patch.object(
         place_service,
         "GOOGLE_PLACES_API_KEY",
@@ -87,6 +90,7 @@ def test_search_places(mock_post, client):
     ):
         response = client.get(
             "/places/search",
+            headers=auth_headers,
             params={
                 "query": "오사카성",
             },
@@ -97,7 +101,6 @@ def test_search_places(mock_post, client):
     data = response.json()
 
     assert len(data) == 1
-
     assert data[0]["name"] == "Osaka Castle"
     assert data[0]["category"] == "castle"
     assert data[0]["external_place_id"] == (
@@ -109,13 +112,17 @@ def test_search_places(mock_post, client):
 
 
 @patch("backend.services.place.httpx.post")
-def test_search_places_empty_result(mock_post, client):
+def test_search_places_empty_result(
+    mock_post,
+    client,
+    auth_headers,
+):
     mock_post.return_value.status_code = 200
+    mock_post.return_value.raise_for_status.return_value = None
+
     mock_post.return_value.json.return_value = {
         "places": []
     }
-
-    mock_post.return_value.raise_for_status.return_value = None
 
     with patch.object(
         place_service,
@@ -124,6 +131,7 @@ def test_search_places_empty_result(mock_post, client):
     ):
         response = client.get(
             "/places/search",
+            headers=auth_headers,
             params={
                 "query": "없는장소",
             },
@@ -137,9 +145,11 @@ def test_search_places_empty_result(mock_post, client):
 def test_search_places_with_location_bias(
     mock_post,
     client,
+    auth_headers,
 ):
     mock_post.return_value.status_code = 200
     mock_post.return_value.raise_for_status.return_value = None
+
     mock_post.return_value.json.return_value = {
         "places": []
     }
@@ -151,6 +161,7 @@ def test_search_places_with_location_bias(
     ):
         response = client.get(
             "/places/search",
+            headers=auth_headers,
             params={
                 "query": "스타벅스",
                 "latitude": 34.6937,
@@ -161,24 +172,37 @@ def test_search_places_with_location_bias(
     assert response.status_code == 200
 
     _, kwargs = mock_post.call_args
-
     body = kwargs["json"]
 
     assert body["textQuery"] == "스타벅스"
     assert body["languageCode"] == "ko"
     assert body["pageSize"] == 5
 
-    assert body["locationBias"]["circle"]["center"]["latitude"] == 34.6937
-    assert body["locationBias"]["circle"]["center"]["longitude"] == 135.5023
-    assert body["locationBias"]["circle"]["radius"] == 10000.0
+    assert (
+        body["locationBias"]["circle"]["center"]["latitude"]
+        == 34.6937
+    )
+
+    assert (
+        body["locationBias"]["circle"]["center"]["longitude"]
+        == 135.5023
+    )
+
+    assert (
+        body["locationBias"]["circle"]["radius"]
+        == 10000.0
+    )
+
 
 @patch("backend.services.place.httpx.post")
 def test_search_places_without_location_bias(
     mock_post,
     client,
+    auth_headers,
 ):
     mock_post.return_value.status_code = 200
     mock_post.return_value.raise_for_status.return_value = None
+
     mock_post.return_value.json.return_value = {
         "places": []
     }
@@ -190,6 +214,7 @@ def test_search_places_without_location_bias(
     ):
         response = client.get(
             "/places/search",
+            headers=auth_headers,
             params={
                 "query": "스타벅스",
             },
@@ -198,10 +223,10 @@ def test_search_places_without_location_bias(
     assert response.status_code == 200
 
     _, kwargs = mock_post.call_args
-
     body = kwargs["json"]
 
     assert "locationBias" not in body
+
 
 def test_create_place_with_blank_name(client):
     response = client.post(
@@ -217,6 +242,8 @@ def test_create_place_with_blank_name(client):
     )
 
     assert response.status_code == 422
+
+
 def test_create_place_with_invalid_latitude(client):
     response = client.post(
         "/places",
@@ -231,6 +258,8 @@ def test_create_place_with_invalid_latitude(client):
     )
 
     assert response.status_code == 422
+
+
 def test_create_place_with_invalid_longitude(client):
     response = client.post(
         "/places",

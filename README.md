@@ -2421,3 +2421,321 @@ longitude=135.5023
 ```
 
 Day 12에서는 이를 `trip_id` 기반으로 자동화하는 방향을 생각할 수 있다.
+
+
+# TripCS Day 12 - trip_id 기반 장소 검색 자동화
+
+## 1. 오늘 목표
+
+Day 12에서는 사용자가 latitude / longitude를 직접 넣지 않아도
+현재 여행의 목적지를 기준으로 장소를 검색할 수 있게 만들었다.
+
+핵심 목표:
+
+```text
+query + trip_id
+↓
+Trip 소유권 확인
+↓
+Trip.destination 확인
+↓
+destination 좌표 조회
+↓
+locationBias 자동 적용
+↓
+Google Places 검색
+```
+
+---
+
+## 2. 기존 방식의 한계
+
+Day 11까지는 장소 검색 시 좌표를 직접 넣을 수 있었다.
+
+```text
+query=스타벅스
+latitude=34.6937
+longitude=135.5023
+```
+
+하지만 실제 서비스에서는 사용자가 좌표를 직접 입력하게 만들면 UX가 좋지 않다.
+
+그래서 Day 12에서는 `trip_id`만 받아서 백엔드가 자동으로 목적지를 찾도록 개선했다.
+
+---
+
+## 3. /places/search에 trip_id 추가
+
+`backend/routers/place.py`
+
+핵심 구조:
+
+```python
+def search_places(
+    query: str,
+    trip_id: int | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    destination = None
+
+    if trip_id is not None:
+        trip = get_owned_trip(
+            db=db,
+            trip_id=trip_id,
+            user_id=current_user.id,
+        )
+
+        destination = trip.destination
+
+    return search_places_service(
+        query=query,
+        latitude=latitude,
+        longitude=longitude,
+        destination=destination,
+    )
+```
+
+핵심은:
+
+```text
+trip_id
+↓
+get_owned_trip()
+↓
+내 Trip인지 확인
+↓
+trip.destination 확보
+```
+
+이다.
+
+---
+
+## 4. destination 파라미터 추가
+
+`backend/services/place.py`
+
+```python
+def search_places_service(
+    query: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    destination: str | None = None,
+) -> list[PlaceSearchResult]:
+```
+
+이제 service는:
+
+```text
+직접 좌표
+또는
+Trip destination
+```
+
+둘 중 하나를 이용할 수 있다.
+
+---
+
+## 5. destination을 좌표로 변환
+
+좌표가 없고 destination이 있으면 Google Places API로 목적지 좌표를 먼저 조회한다.
+
+```python
+if (
+    destination
+    and latitude is None
+    and longitude is None
+):
+    destination_body = {
+        "textQuery": destination,
+        "languageCode": "ko",
+        "pageSize": 1,
+    }
+```
+
+FieldMask는 좌표만 필요하기 때문에:
+
+```python
+"X-Goog-FieldMask": "places.location"
+```
+
+만 요청한다.
+
+---
+
+## 6. 1차 Google 호출
+
+예:
+
+```text
+destination = 오사카
+```
+
+이면 먼저:
+
+```text
+Google Places
+textQuery = 오사카
+pageSize = 1
+```
+
+로 요청한다.
+
+응답에서:
+
+```python
+latitude = destination_location.get(
+    "latitude"
+)
+
+longitude = destination_location.get(
+    "longitude"
+)
+```
+
+로 좌표를 얻는다.
+
+---
+
+## 7. 2차 Google 호출
+
+좌표를 얻은 뒤 실제 검색어를 다시 검색한다.
+
+예:
+
+```text
+query = 스타벅스
+```
+
+최종 body:
+
+```python
+body = {
+    "textQuery": query,
+    "languageCode": "ko",
+    "pageSize": 5,
+}
+```
+
+좌표가 존재하면:
+
+```python
+body["locationBias"] = {
+    "circle": {
+        "center": {
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+        "radius": 10000.0,
+    }
+}
+```
+
+를 넣는다.
+
+---
+
+## 8. 최종 동작 흐름
+
+예:
+
+```text
+query = 스타벅스
+trip_id = 3
+```
+
+백엔드:
+
+```text
+Trip 3 조회
+↓
+destination = 오사카
+↓
+Google Places에서 오사카 검색
+↓
+오사카 좌표 확보
+↓
+locationBias 10km 적용
+↓
+스타벅스 검색
+↓
+오사카 근처 스타벅스 최대 5개 반환
+```
+
+---
+
+## 9. 실제 동작 확인
+
+처음 테스트에서는 Trip.destination이 의미 없는 `"string"` 값이라
+의정부 주변 검색 결과가 나왔다.
+
+이후 destination을:
+
+```text
+오사카
+```
+
+로 저장한 Trip으로 다시 검색하자:
+
+```text
+스타벅스 커피 사쿠라바시 플라자 빌딩점
+스타벅스 커피 히고바시 미나미점
+스타벅스 다이마루 우메다
+...
+```
+
+처럼 오사카 주변 결과가 정상적으로 반환되었다.
+
+즉 `trip_id → destination → 좌표 → locationBias` 흐름이 제대로 작동함을 확인했다.
+
+---
+
+## 10. destination을 못 찾았을 때 fallback
+
+destination 검색 결과가 비어 있으면:
+
+```python
+destination_places = []
+```
+
+가 된다.
+
+이 경우 latitude / longitude가 설정되지 않기 때문에
+`locationBias` 없이 일반 장소 검색으로 넘어간다.
+
+즉:
+
+```text
+목적지 좌표 찾음
+→ 위치 기반 검색
+
+목적지 좌표 못 찾음
+→ 일반 검색 fallback
+```
+
+이다.
+
+---
+# Day 12 완료
+
+Day 12에서 TripCS의 장소 검색이
+단순 키워드 검색에서 여행 컨텍스트를 이해하는 검색으로 발전했다.
+
+```text
+스타벅스
+```
+
+라는 같은 검색어도:
+
+```text
+오사카 Trip
+→ 오사카 스타벅스
+
+서울 Trip
+→ 서울 스타벅스
+```
+
+처럼 현재 여행 목적지에 맞는 결과를 우선해서 반환할 수 있게 되었다.
