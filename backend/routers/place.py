@@ -21,52 +21,6 @@ router = APIRouter(
     tags=["places"],
 )
 
-
-@router.get(
-    "/search",
-    response_model=list[PlaceSearchResult],
-)
-def search_places(
-    query: str = Query(
-        min_length=1,
-        max_length=100,
-    ),
-    trip_id: int | None = Query(
-        default=None,
-        gt=0,
-    ),
-    latitude: float | None = Query(
-        default=None,
-        ge=-90,
-        le=90,
-    ),
-    longitude: float | None = Query(
-        default=None,
-        ge=-180,
-        le=180,
-    ),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    destination = None
-
-    if trip_id is not None:
-        trip = get_owned_trip(
-            db=db,
-            trip_id=trip_id,
-            user_id=current_user.id,
-        )
-
-        destination = trip.destination
-
-    return search_places_service(
-        query=query,
-        latitude=latitude,
-        longitude=longitude,
-        destination=destination,
-    )
-
-
 @router.post(
     "",
     response_model=PlaceResponse,
@@ -79,4 +33,29 @@ def create_place(
     return create_place_service(
         db=db,
         place_data=place,
+    )
+@router.get("/search", response_model=list[PlaceSearchResult])
+def search_places(
+    query: str = Query(min_length=1, max_length=100),
+    trip_id: int | None = Query(default=None, gt=0),
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if trip_id is not None:
+        trip = get_owned_trip(
+            db=db,
+            trip_id=trip_id,
+            user_id=current_user.id,
+        )
+
+        if latitude is None and longitude is None:
+            latitude = trip.destination_latitude
+            longitude = trip.destination_longitude
+
+    return search_places_service(
+        query=query,
+        latitude=latitude,
+        longitude=longitude,
     )

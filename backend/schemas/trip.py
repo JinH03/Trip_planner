@@ -72,7 +72,8 @@ class TripResponse(BaseModel):
     start_date: date
     end_date: date
     created_at: datetime
-
+    destination_latitude: float | None
+    destination_longitude: float | None
     model_config = {
         "from_attributes": True
     }

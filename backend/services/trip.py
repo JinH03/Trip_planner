@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 
 from backend.models import Trip, TripDay, User
 from backend.schemas.trip import TripCreate, TripUpdate
+from backend.services.place import (
+    resolve_destination_coordinates,
+)
 
 
 def create_trip_with_days(
@@ -18,11 +21,19 @@ def create_trip_with_days(
             detail="End date must be on or after start date",
         )
 
+    destination_latitude, destination_longitude = (
+        resolve_destination_coordinates(
+            trip_data.destination
+        )
+    )
+
     try:
         new_trip = Trip(
             user_id=current_user.id,
             title=trip_data.title,
             destination=trip_data.destination,
+            destination_latitude=destination_latitude,
+            destination_longitude=destination_longitude,
             start_date=trip_data.start_date,
             end_date=trip_data.end_date,
         )
@@ -70,11 +81,30 @@ def update_trip_with_days(
             detail="End date must be on or after start date",
         )
 
+    destination_changed = (
+        trip.destination != trip_data.destination
+    )
+
+    if destination_changed:
+        destination_latitude, destination_longitude = (
+            resolve_destination_coordinates(
+                trip_data.destination
+            )
+        )
+
     try:
         trip.title = trip_data.title
         trip.destination = trip_data.destination
         trip.start_date = trip_data.start_date
         trip.end_date = trip_data.end_date
+
+        if destination_changed:
+            trip.destination_latitude = (
+                destination_latitude
+            )
+            trip.destination_longitude = (
+                destination_longitude
+            )
 
         total_days = (
             trip_data.end_date
@@ -147,3 +177,4 @@ def delete_trip_service(
     except Exception:
         db.rollback()
         raise
+

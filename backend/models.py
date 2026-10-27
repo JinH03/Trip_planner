@@ -155,6 +155,15 @@ class Trip(Base):
         back_populates="trip",
         cascade="all, delete-orphan",
     )
+    destination_latitude: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    destination_longitude: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
 class TripDay(Base):
     __tablename__ = "trip_days"
 

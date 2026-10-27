@@ -240,31 +240,14 @@ def test_create_trip_with_invalid_date_range(
 
     assert response.status_code == 400
 
-
 @patch("backend.services.place.httpx.post")
-def test_search_places_with_trip_id_uses_destination_bias(
+def test_search_places_with_trip_id_uses_saved_coordinates(
     mock_post,
     client,
     auth_headers,
 ):
-    trip_response = client.post(
-        "/trips",
-        headers=auth_headers,
-        json={
-            "title": "오사카 여행",
-            "destination": "오사카",
-            "start_date": "2026-10-20",
-            "end_date": "2026-10-21",
-        },
-    )
-
-    assert trip_response.status_code == 201
-
-    trip_id = trip_response.json()["id"]
-
+    # Trip 생성 시 destination 좌표 조회용 응답
     mock_post.side_effect = [
-        # 1번째 호출:
-        # destination = "오사카" 좌표 조회
         type(
             "MockResponse",
             (),
@@ -283,9 +266,7 @@ def test_search_places_with_trip_id_uses_destination_bias(
                 },
             },
         )(),
-
-        # 2번째 호출:
-        # 실제 스타벅스 검색
+        # 실제 장소 검색 응답
         type(
             "MockResponse",
             (),
@@ -318,6 +299,21 @@ def test_search_places_with_trip_id_uses_destination_bias(
         "GOOGLE_PLACES_API_KEY",
         "test-api-key",
     ):
+        trip_response = client.post(
+            "/trips",
+            headers=auth_headers,
+            json={
+                "title": "오사카 여행",
+                "destination": "오사카",
+                "start_date": "2026-10-20",
+                "end_date": "2026-10-21",
+            },
+        )
+
+        assert trip_response.status_code == 201
+
+        trip_id = trip_response.json()["id"]
+
         response = client.get(
             "/places/search",
             headers=auth_headers,
@@ -336,12 +332,14 @@ def test_search_places_with_trip_id_uses_destination_bias(
 
     assert mock_post.call_count == 2
 
+    # 1번째 호출 = Trip 생성 시 목적지 좌표 조회
     first_call = mock_post.call_args_list[0]
     first_body = first_call.kwargs["json"]
 
     assert first_body["textQuery"] == "오사카"
     assert first_body["pageSize"] == 1
 
+    # 2번째 호출 = 장소 검색
     second_call = mock_post.call_args_list[1]
     second_body = second_call.kwargs["json"]
 
@@ -356,3 +354,197 @@ def test_search_places_with_trip_id_uses_destination_bias(
         second_body["locationBias"]["circle"]["center"]["longitude"]
         == 135.5023
     )
+
+@patch("backend.services.place.httpx.post")
+def test_create_trip_saves_destination_coordinates(
+    mock_post,
+    client,
+    auth_headers,
+):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_post.return_value.json.return_value = {
+        "places": [
+            {
+                "location": {
+                    "latitude": 34.6937,
+                    "longitude": 135.5023,
+                }
+            }
+        ]
+    }
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        response = client.post(
+            "/trips",
+            headers=auth_headers,
+            json={
+                "title": "오사카 여행",
+                "destination": "오사카",
+                "start_date": "2026-10-20",
+                "end_date": "2026-10-21",
+            },
+        )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["destination"] == "오사카"
+    assert data["destination_latitude"] == 34.6937
+    assert data["destination_longitude"] == 135.5023
+
+    assert mock_post.call_count == 1
+
+    _, kwargs = mock_post.call_args
+    body = kwargs["json"]
+
+    assert body["textQuery"] == "오사카"
+    assert body["pageSize"] == 1
+
+@patch("backend.services.place.httpx.post")
+def test_update_trip_refreshes_destination_coordinates(
+    mock_post,
+    client,
+    auth_headers,
+):
+    mock_post.side_effect = [
+        type(
+            "MockResponse",
+            (),
+            {
+                "status_code": 200,
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "places": [
+                        {
+                            "location": {
+                                "latitude": 34.6937,
+                                "longitude": 135.5023,
+                            }
+                        }
+                    ]
+                },
+            },
+        )(),
+        type(
+            "MockResponse",
+            (),
+            {
+                "status_code": 200,
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "places": [
+                        {
+                            "location": {
+                                "latitude": 35.6762,
+                                "longitude": 139.6503,
+                            }
+                        }
+                    ]
+                },
+            },
+        )(),
+    ]
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        create_response = client.post(
+            "/trips",
+            headers=auth_headers,
+            json={
+                "title": "일본 여행",
+                "destination": "오사카",
+                "start_date": "2026-10-20",
+                "end_date": "2026-10-21",
+            },
+        )
+
+        assert create_response.status_code == 201
+
+        trip_id = create_response.json()["id"]
+
+        update_response = client.put(
+            f"/trips/{trip_id}",
+            headers=auth_headers,
+            json={
+                "title": "일본 여행",
+                "destination": "도쿄",
+                "start_date": "2026-10-20",
+                "end_date": "2026-10-21",
+            },
+        )
+
+    assert update_response.status_code == 200
+
+    data = update_response.json()
+
+    assert data["destination"] == "도쿄"
+    assert data["destination_latitude"] == 35.6762
+    assert data["destination_longitude"] == 139.6503
+
+    assert mock_post.call_count == 2
+
+
+@patch("backend.services.place.httpx.post")
+def test_update_trip_does_not_refresh_coordinates_when_destination_unchanged(
+    mock_post,
+    client,
+    auth_headers,
+):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_post.return_value.json.return_value = {
+        "places": [
+            {
+                "location": {
+                    "latitude": 34.6937,
+                    "longitude": 135.5023,
+                }
+            }
+        ]
+    }
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        create_response = client.post(
+            "/trips",
+            headers=auth_headers,
+            json={
+                "title": "오사카 여행",
+                "destination": "오사카",
+                "start_date": "2026-10-20",
+                "end_date": "2026-10-21",
+            },
+        )
+
+        assert create_response.status_code == 201
+
+        trip_id = create_response.json()["id"]
+
+        calls_before_update = mock_post.call_count
+
+        update_response = client.put(
+            f"/trips/{trip_id}",
+            headers=auth_headers,
+            json={
+                "title": "오사카 여행 수정",
+                "destination": "오사카",
+                "start_date": "2026-10-20",
+                "end_date": "2026-10-22",
+            },
+        )
+
+    assert update_response.status_code == 200
+
+    assert mock_post.call_count == calls_before_update

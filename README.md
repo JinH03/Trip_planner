@@ -2739,3 +2739,109 @@ Day 12에서 TripCS의 장소 검색이
 ```
 
 처럼 현재 여행 목적지에 맞는 결과를 우선해서 반환할 수 있게 되었다.
+
+
+# TripCS — Day 13 학습 README
+
+## 오늘의 목표
+
+Trip 생성 시 여행 목적지 좌표를 조회해서 DB에 저장하고, 이후 장소 검색에서는 저장된 좌표를 재사용한다.
+
+- Day12: 장소 검색 1회당 Google Places API 호출 2회 (목적지 좌표 조회 + 장소 검색)
+- Day13: 좌표가 저장된 Trip의 장소 검색 1회당 Google Places API 호출 1회 (장소 검색만)
+
+## 1. Trip 모델과 DB 변경
+
+Trip 모델에 다음 두 필드를 추가했다.
+
+```python
+destination_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+destination_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+```
+
+Alembic으로 마이그레이션을 만들고 적용했다.
+
+```bash
+alembic revision --autogenerate -m "add destination coordinates to trips"
+alembic upgrade head
+```
+
+모델 코드 변경만으로 실제 DB 테이블이 바뀌지는 않으므로 마이그레이션이 필요하다.
+
+TripResponse에도 두 좌표 필드를 추가해 API 응답에서 확인할 수 있게 했다.
+
+## 2. 목적지 좌표 조회 함수 분리
+
+`backend/services/place.py`에 `resolve_destination_coordinates(destination)`를 두었다.
+
+Google Places Text Search에 목적지를 보내고, 첫 결과의 위치를 `(latitude, longitude)`로 반환한다.
+결과가 없으면 `(None, None)`을 반환한다. 요청 오류는 502로 처리한다.
+
+```python
+latitude, longitude = resolve_destination_coordinates("오사카")
+```
+
+이 함수는 Trip 생성 및 목적지 변경 시 재사용한다.
+
+## 3. Trip 생성 시 좌표 저장
+
+`backend/services/trip.py`의 `create_trip_with_days()`에서 Trip을 만들기 전 목적지 좌표를 조회한다.
+
+```python
+latitude, longitude = resolve_destination_coordinates(trip_data.destination)
+
+new_trip = Trip(
+    user_id=current_user.id,
+    title=trip_data.title,
+    destination=trip_data.destination,
+    destination_latitude=latitude,
+    destination_longitude=longitude,
+    start_date=trip_data.start_date,
+    end_date=trip_data.end_date,
+)
+```
+
+기존처럼 `db.flush()`로 Trip ID를 확보한 뒤 TripDay를 생성하고 커밋한다.
+현재 구현에서는 Google API 조회 오류가 나면 Trip 생성도 실패할 수 있다.
+
+## 4. Trip 수정 시 필요한 경우에만 재조회
+
+```python
+destination_changed = trip.destination != trip_data.destination
+
+if destination_changed:
+    latitude, longitude = resolve_destination_coordinates(trip_data.destination)
+    trip.destination_latitude = latitude
+    trip.destination_longitude = longitude
+```
+
+여행 제목이나 날짜만 변경하면 좌표 조회를 다시 하지 않는다.
+목적지 자체가 변경되면 좌표도 함께 갱신한다.
+
+## 5. 장소 검색 시 저장 좌표 사용
+
+`backend/routers/place.py`에서 `trip_id`가 주어지면 소유권 검사 후 Trip에 저장된 좌표를 읽는다.
+
+```python
+trip = get_owned_trip(db=db, trip_id=trip_id, user_id=current_user.id)
+
+if latitude is None and longitude is None:
+    latitude = trip.destination_latitude
+    longitude = trip.destination_longitude
+
+return search_places_service(query=query, latitude=latitude, longitude=longitude)
+```
+
+`search_places_service()`에서는 더 이상 `destination` 문자열을 받아 좌표를 먼저 조회할 필요가 없다.
+좌표가 둘 다 존재하면 `locationBias`를 추가해 실제 장소 검색을 수행한다.
+
+## 6. 테스트에서 확인한 내용
+
+- Trip 생성 시 반환된 좌표가 예상값과 일치하는가?
+- `trip_id`로 장소 검색할 때 저장된 좌표가 `locationBias`에 들어가는가?
+- Trip 생성 시 1회 + 장소 검색 시 1회 호출되며, 장소 검색 구간에서 추가 호출은 1회뿐인가?
+- 목적지가 오사카에서 도쿄로 바뀌면 좌표가 갱신되는가?
+- 제목·날짜만 바뀌면 Google API를 다시 호출하지 않는가?
+
+테스트에서는 `unittest.mock.patch`로 Google API 호출을 모의 응답으로 대체했다.
+최종 `pytest -v` 전체 테스트 통과를 확인했다.
