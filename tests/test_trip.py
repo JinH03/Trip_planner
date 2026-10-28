@@ -1,5 +1,5 @@
 from unittest.mock import patch
-
+from fastapi import HTTPException
 from backend.services import place as place_service
 
 
@@ -548,3 +548,91 @@ def test_update_trip_does_not_refresh_coordinates_when_destination_unchanged(
     assert update_response.status_code == 200
 
     assert mock_post.call_count == calls_before_update
+
+
+@patch("backend.services.trip.resolve_destination_coordinates")
+def test_create_trip_when_google_api_fails(
+    mock_resolve,
+    client,
+    auth_headers,
+):
+    mock_resolve.side_effect = HTTPException( 
+        status_code=502,
+        detail="Google Places API request failed",
+    )
+
+    response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["destination_latitude"] is None
+    assert data["destination_longitude"] is None
+
+@patch("backend.services.trip.resolve_destination_coordinates")
+def test_update_trip_when_google_api_fails(
+    mock_resolve,
+    client,
+    auth_headers,
+):
+
+    mock_resolve.side_effect = [
+        (34.6937, 135.5023),
+        HTTPException(
+            status_code=502,
+            detail="Failed to resolve trip destination",
+        ),
+    ]
+
+    create_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "일본 여행",
+            "destination": "오사카",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+
+    assert create_response.status_code == 201
+
+    trip_id = create_response.json()["id"]
+
+    update_response = client.put(
+        f"/trips/{trip_id}",
+        headers=auth_headers,
+        json={
+            "title": "일본 여행 수정",
+            "destination": "도쿄",
+            "start_date": "2026-10-20",
+            "end_date": "2026-10-21",
+        },
+    )
+    assert update_response.status_code == 200
+
+    data = update_response.json()
+
+    assert data["destination"] == "도쿄"
+    assert data["destination_latitude"] is None
+    assert data["destination_longitude"] is None
+
+    assert mock_resolve.call_count == 2
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    assert detail_response.status_code == 200
+    assert detail_response.json()["destination"] == "도쿄"

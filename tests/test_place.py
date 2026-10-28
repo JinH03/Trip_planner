@@ -1,4 +1,9 @@
+
 from unittest.mock import patch
+
+import httpx
+import pytest
+from fastapi import HTTPException
 
 from backend.services import place as place_service
 
@@ -188,10 +193,7 @@ def test_search_places_with_location_bias(
         == 135.5023
     )
 
-    assert (
-        body["locationBias"]["circle"]["radius"]
-        == 10000.0
-    )
+    assert body["locationBias"]["circle"]["radius"] == 10000.0
 
 
 @patch("backend.services.place.httpx.post")
@@ -274,3 +276,140 @@ def test_create_place_with_invalid_longitude(client):
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "google_status, expected_status, expected_calls",
+    [
+        (400, 502, 1),
+        (403, 502, 1),
+        (429, 503, 3),
+        (500, 503, 3),
+        (503, 503, 3),
+    ],
+)
+@patch("backend.services.place.time.sleep")
+@patch("backend.services.place.httpx.post")
+def test_google_places_http_errors(
+    mock_post,
+    mock_sleep,
+    google_status,
+    expected_status,
+    expected_calls,
+):
+    request = httpx.Request(
+        "POST",
+        place_service.GOOGLE_PLACES_SEARCH_URL,
+    )
+
+    response = httpx.Response(
+        status_code=google_status,
+        request=request,
+    )
+
+    mock_post.return_value = response
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            place_service.search_places_service(
+                query="스타벅스",
+            )
+
+    assert exc_info.value.status_code == expected_status
+    assert mock_post.call_count == expected_calls
+
+    if expected_calls == 3:
+        assert mock_sleep.call_count == 2
+    else:
+        mock_sleep.assert_not_called()
+
+
+@patch("backend.services.place.time.sleep")
+@patch("backend.services.place.httpx.post")
+def test_google_places_timeout(
+    mock_post,
+    mock_sleep,
+):
+    mock_post.side_effect = httpx.ReadTimeout(
+        "Google Places API timed out"
+    )
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            place_service.search_places_service(
+                query="스타벅스",
+            )
+
+    assert exc_info.value.status_code == 504
+    assert mock_post.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@patch("backend.services.place.httpx.post")
+def test_google_places_connection_error(mock_post):
+    mock_post.side_effect = httpx.ConnectError(
+        "Connection failed"
+    )
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            place_service.search_places_service(
+                query="스타벅스",
+            )
+
+    assert exc_info.value.status_code == 502
+    assert mock_post.call_count == 1
+
+
+@patch("backend.services.place.time.sleep")
+@patch("backend.services.place.httpx.post")
+def test_google_places_retry_then_success(
+    mock_post,
+    mock_sleep,
+):
+    request = httpx.Request(
+        "POST",
+        place_service.GOOGLE_PLACES_SEARCH_URL,
+    )
+
+    mock_post.side_effect = [
+        # 첫 번째 요청: Google API 503
+        httpx.Response(
+            status_code=503,
+            request=request,
+        ),
+
+        # 두 번째 요청: 정상 응답
+        httpx.Response(
+            status_code=200,
+            request=request,
+            json={
+                "places": []
+            },
+        ),
+    ]
+
+    with patch.object(
+        place_service,
+        "GOOGLE_PLACES_API_KEY",
+        "test-api-key",
+    ):
+        result = place_service.search_places_service(
+            query="스타벅스",
+        )
+
+    assert result == []
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once_with(0.2)

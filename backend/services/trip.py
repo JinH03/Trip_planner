@@ -1,3 +1,4 @@
+
 from datetime import timedelta
 
 from fastapi import HTTPException, status
@@ -5,9 +6,26 @@ from sqlalchemy.orm import Session
 
 from backend.models import Trip, TripDay, User
 from backend.schemas.trip import TripCreate, TripUpdate
-from backend.services.place import (
-    resolve_destination_coordinates,
-)
+from backend.services.place import resolve_destination_coordinates
+
+
+def get_destination_coordinates_with_fallback(
+    destination: str,
+) -> tuple[float | None, float | None]:
+    """
+    목적지 좌표를 조회한다.
+
+    Google API의 일시적 장애(502, 503, 504)라면
+    좌표 없이 진행하고, 다른 오류는 다시 발생시킨다.
+    """
+    try:
+        return resolve_destination_coordinates(destination)
+
+    except HTTPException as exc:
+        if exc.status_code not in (502, 503, 504):
+            raise
+
+        return None, None
 
 
 def create_trip_with_days(
@@ -22,7 +40,7 @@ def create_trip_with_days(
         )
 
     destination_latitude, destination_longitude = (
-        resolve_destination_coordinates(
+        get_destination_coordinates_with_fallback(
             trip_data.destination
         )
     )
@@ -40,12 +58,11 @@ def create_trip_with_days(
 
         db.add(new_trip)
 
-        # commit 전 new_trip.id 확보
+        # commit 전에 Trip ID 확보
         db.flush()
 
         total_days = (
-            trip_data.end_date
-            - trip_data.start_date
+            trip_data.end_date - trip_data.start_date
         ).days + 1
 
         for i in range(total_days):
@@ -87,7 +104,7 @@ def update_trip_with_days(
 
     if destination_changed:
         destination_latitude, destination_longitude = (
-            resolve_destination_coordinates(
+            get_destination_coordinates_with_fallback(
                 trip_data.destination
             )
         )
@@ -99,30 +116,21 @@ def update_trip_with_days(
         trip.end_date = trip_data.end_date
 
         if destination_changed:
-            trip.destination_latitude = (
-                destination_latitude
-            )
-            trip.destination_longitude = (
-                destination_longitude
-            )
+            trip.destination_latitude = destination_latitude
+            trip.destination_longitude = destination_longitude
 
         total_days = (
-            trip_data.end_date
-            - trip_data.start_date
+            trip_data.end_date - trip_data.start_date
         ).days + 1
 
         existing_days = (
             db.query(TripDay)
-            .filter(
-                TripDay.trip_id == trip.id
-            )
-            .order_by(
-                TripDay.day_number
-            )
+            .filter(TripDay.trip_id == trip.id)
+            .order_by(TripDay.day_number)
             .all()
         )
 
-        # 기존 Day 날짜 갱신
+        # 기존 TripDay 날짜 갱신
         for i in range(
             min(len(existing_days), total_days)
         ):
@@ -132,7 +140,7 @@ def update_trip_with_days(
                 + timedelta(days=i)
             )
 
-        # 기간 증가 → Day 추가
+        # 여행 기간 증가: TripDay 추가
         if total_days > len(existing_days):
             for i in range(
                 len(existing_days),
@@ -149,7 +157,7 @@ def update_trip_with_days(
 
                 db.add(new_day)
 
-        # 기간 감소 → 초과 Day 삭제
+        # 여행 기간 감소: 초과 TripDay 삭제
         elif total_days < len(existing_days):
             extra_days = existing_days[total_days:]
 
@@ -177,4 +185,3 @@ def delete_trip_service(
     except Exception:
         db.rollback()
         raise
-
