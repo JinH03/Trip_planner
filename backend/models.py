@@ -229,7 +229,10 @@ class Schedule(Base):
         Time,
         nullable=True,
     )
-
+    end_time: Mapped[time | None] = mapped_column(
+        Time,
+        nullable=True,
+    )
     place: Mapped[str | None] = mapped_column(
         String(200),
         nullable=True,

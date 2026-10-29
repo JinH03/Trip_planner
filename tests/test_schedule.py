@@ -538,3 +538,357 @@ def test_trip_detail_contains_schedule_place_info(
     assert schedule["place_info"] is not None
     assert schedule["place_info"]["id"] == place["id"]
     assert schedule["place_info"]["name"] == "오사카성"
+
+def create_day15_trip_day(client, auth_headers):
+    trip_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-11-01",
+            "end_date": "2026-11-02",
+        },
+    )
+
+    assert trip_response.status_code == 201
+
+    trip_id = trip_response.json()["id"]
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    assert detail_response.status_code == 200
+
+    return detail_response.json()["days"][0]["id"]
+
+
+def create_day15_schedule(
+    client,
+    auth_headers,
+    trip_day_id,
+    title,
+    start_time,
+    end_time,
+    order_index=0,
+):
+    return client.post(
+        f"/trip-days/{trip_day_id}/schedules",
+        headers=auth_headers,
+        json={
+            "title": title,
+            "start_time": start_time,
+            "end_time": end_time,
+            "order_index": order_index,
+        },
+    )
+
+
+def test_create_schedule_with_valid_time_range(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["start_time"] == "09:00:00"
+    assert response.json()["end_time"] == "11:00:00"
+
+
+def test_create_schedule_with_conflicting_time(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    first_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    assert first_response.status_code == 201
+
+    second_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "점심 식사",
+        "10:30",
+        "12:00",
+        order_index=1,
+    )
+
+    assert second_response.status_code == 400
+    assert (
+        second_response.json()["detail"]
+        == "Schedule time conflicts with an existing schedule"
+    )
+
+
+def test_create_schedule_without_conflicting_time(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    first_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    assert first_response.status_code == 201
+
+    second_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "도톤보리 관광",
+        "13:00",
+        "15:00",
+        order_index=1,
+    )
+
+    assert second_response.status_code == 201
+
+
+def test_create_schedule_with_adjacent_time(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    first_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    assert first_response.status_code == 201
+
+    second_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "점심 식사",
+        "11:00",
+        "12:00",
+        order_index=1,
+    )
+
+    assert second_response.status_code == 201
+
+
+def test_create_schedule_with_invalid_time_range(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "잘못된 일정",
+        "15:00",
+        "13:00",
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_schedule_with_conflicting_time(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    first_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    second_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "도톤보리 관광",
+        "13:00",
+        "15:00",
+        order_index=1,
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+
+    schedule_id = second_response.json()["id"]
+
+    update_response = client.put(
+        f"/trip-days/{trip_day_id}/schedules/{schedule_id}",
+        headers=auth_headers,
+        json={
+            "title": "도톤보리 관광 수정",
+            "start_time": "10:30",
+            "end_time": "12:00",
+            "order_index": 1,
+        },
+    )
+
+    assert update_response.status_code == 400
+
+
+def test_update_schedule_excludes_itself_from_conflict(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client, auth_headers
+    )
+
+    create_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    assert create_response.status_code == 201
+
+    schedule_id = create_response.json()["id"]
+
+    update_response = client.put(
+        f"/trip-days/{trip_day_id}/schedules/{schedule_id}",
+        headers=auth_headers,
+        json={
+            "title": "오사카성 관광 수정",
+            "start_time": "09:00",
+            "end_time": "11:00",
+            "order_index": 0,
+        },
+    )
+
+    assert update_response.status_code == 200
+
+def test_schedule_same_time_on_different_days(
+    client,
+    auth_headers,
+):
+    trip_response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-11-01",
+            "end_date": "2026-11-02",
+        },
+    )
+
+    assert trip_response.status_code == 201
+
+    trip_id = trip_response.json()["id"]
+
+    detail_response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+
+    assert detail_response.status_code == 200
+
+    days = detail_response.json()["days"]
+
+    day1_id = days[0]["id"]
+    day2_id = days[1]["id"]
+
+    first_response = create_day15_schedule(
+        client,
+        auth_headers,
+        day1_id,
+        "오사카성 관광",
+        "09:00",
+        "11:00",
+    )
+
+    second_response = create_day15_schedule(
+        client,
+        auth_headers,
+        day2_id,
+        "도톤보리 관광",
+        "09:00",
+        "11:00",
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 201
+
+def test_schedule_without_end_time(
+    client,
+    auth_headers,
+):
+    trip_day_id = create_day15_trip_day(
+        client,
+        auth_headers,
+    )
+
+    first_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "종료 시간 없는 기존 일정",
+        "09:00",
+        None,
+    )
+
+    assert first_response.status_code == 201
+    assert first_response.json()["end_time"] is None
+
+    second_response = create_day15_schedule(
+        client,
+        auth_headers,
+        trip_day_id,
+        "새 일정",
+        "09:30",
+        "11:00",
+        order_index=1,
+    )
+
+    assert second_response.status_code == 201

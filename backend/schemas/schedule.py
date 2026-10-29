@@ -1,7 +1,7 @@
 from datetime import datetime, time
 
 from pydantic import BaseModel, Field, field_validator
-
+from pydantic import model_validator
 from backend.schemas.place import PlaceResponse
 
 
@@ -12,7 +12,7 @@ class ScheduleCreate(BaseModel):
     )
 
     start_time: time | None = None
-
+    end_time: time | None = None
     place: str | None = Field(
         default=None,
         max_length=200,
@@ -44,7 +44,15 @@ class ScheduleCreate(BaseModel):
             )
 
         return value
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.start_time is not None and self.end_time is not None:
+            if self.end_time <= self.start_time:
+                raise ValueError(
+                    "end_time must be later than start_time"
+                )
 
+        return self
 
 class ScheduleUpdate(BaseModel):
     title: str = Field(
@@ -53,7 +61,7 @@ class ScheduleUpdate(BaseModel):
     )
 
     start_time: time | None = None
-
+    end_time: time | None = None
     place: str | None = Field(
         default=None,
         max_length=200,
@@ -85,13 +93,22 @@ class ScheduleUpdate(BaseModel):
             )
 
         return value
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.start_time is not None and self.end_time is not None:
+            if self.end_time <= self.start_time:
+                raise ValueError(
+                    "end_time must be later than start_time"
+                )
 
+        return self
 
 class ScheduleResponse(BaseModel):
     id: int
     trip_day_id: int
     title: str
     start_time: time | None
+    end_time: time | None
     place: str | None
     place_id: int | None
     place_info: PlaceResponse | None
