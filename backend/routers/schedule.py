@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
@@ -7,7 +9,7 @@ from backend.dependencies.ownership import (
     get_owned_schedule,
     get_owned_trip_day,
 )
-from backend.models import Schedule, User
+from backend.models import User
 from backend.schemas.schedule import (
     ScheduleCreate,
     ScheduleReorderRequest,
@@ -17,6 +19,7 @@ from backend.schemas.schedule import (
 from backend.services.schedule import (
     create_schedule_service,
     delete_schedule_service,
+    get_schedules_sorted_service,
     reorder_schedules_service,
     update_schedule_service,
 )
@@ -58,6 +61,7 @@ def create_schedule(
 )
 def get_schedules(
     trip_day_id: int,
+    sort_by: Literal["manual", "time"] = "manual",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -67,19 +71,11 @@ def get_schedules(
         user_id=current_user.id,
     )
 
-    schedules = (
-        db.query(Schedule)
-        .filter(
-            Schedule.trip_day_id == trip_day.id
-        )
-        .order_by(
-            Schedule.order_index,
-            Schedule.start_time,
-        )
-        .all()
+    return get_schedules_sorted_service(
+        db=db,
+        trip_day_id=trip_day.id,
+        sort_by=sort_by,
     )
-
-    return schedules
 
 
 @router.put(
@@ -169,3 +165,4 @@ def delete_schedule(
         db=db,
         schedule=schedule,
     )
+

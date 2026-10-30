@@ -892,3 +892,216 @@ def test_schedule_without_end_time(
     )
 
     assert second_response.status_code == 201
+
+
+def test_schedule_sort_manual_and_time(client, auth_headers):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    schedules = [
+        ("쇼핑", "16:00", "17:00", 0),
+        ("오사카성", "09:00", "11:00", 1),
+        ("점심", "12:00", "13:00", 2),
+    ]
+
+    for title, start, end, order in schedules:
+        response = create_day15_schedule(
+            client, auth_headers, day_id,
+            title, start, end, order,
+        )
+        assert response.status_code == 201
+
+    url = f"/trip-days/{day_id}/schedules"
+
+    manual = client.get(
+        url,
+        headers=auth_headers,
+        params={"sort_by": "manual"},
+    )
+    assert manual.status_code == 200
+    assert [s["title"] for s in manual.json()] == [
+        "쇼핑", "오사카성", "점심"
+    ]
+
+    by_time = client.get(
+        url,
+        headers=auth_headers,
+        params={"sort_by": "time"},
+    )
+    assert by_time.status_code == 200
+    assert [s["title"] for s in by_time.json()] == [
+        "오사카성", "점심", "쇼핑"
+    ]
+def test_schedule_sort_time_nulls_last(client, auth_headers):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    for title, start, end, order in [
+        ("시간 미정", None, None, 0),
+        ("오전 관광", "09:00", "10:00", 1),
+        ("오후 관광", "14:00", "15:00", 2),
+    ]:
+        response = create_day15_schedule(
+            client, auth_headers, day_id,
+            title, start, end, order,
+        )
+        assert response.status_code == 201
+
+    response = client.get(
+        f"/trip-days/{day_id}/schedules",
+        headers=auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert response.status_code == 200
+    assert [s["title"] for s in response.json()] == [
+        "오전 관광", "오후 관광", "시간 미정"
+    ]
+def test_schedule_sort_invalid_option(client, auth_headers):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    response = client.get(
+        f"/trip-days/{day_id}/schedules",
+        headers=auth_headers,
+        params={"sort_by": "random"},
+    )
+
+    assert response.status_code == 422
+
+def test_schedule_sort_after_reorder(client, auth_headers):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    first = create_day15_schedule(
+        client, auth_headers, day_id,
+        "오사카성", "09:00", "11:00", 0,
+    )
+    second = create_day15_schedule(
+        client, auth_headers, day_id,
+        "점심", "12:00", "13:00", 1,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    first_id = first.json()["id"]
+    second_id = second.json()["id"]
+
+    # 사용자 수동 순서를 반대로 변경
+    reorder_response = client.put(
+        f"/trip-days/{day_id}/schedules/reorder",
+        headers=auth_headers,
+        json={
+            "schedules": [
+                {"schedule_id": first_id, "order_index": 1},
+                {"schedule_id": second_id, "order_index": 0},
+            ]
+        },
+    )
+
+    assert reorder_response.status_code == 200
+
+    url = f"/trip-days/{day_id}/schedules"
+
+    manual = client.get(
+        url,
+        headers=auth_headers,
+        params={"sort_by": "manual"},
+    )
+    assert manual.status_code == 200
+    assert [s["title"] for s in manual.json()] == [
+        "점심", "오사카성"
+    ]
+
+    by_time = client.get(
+        url,
+        headers=auth_headers,
+        params={"sort_by": "time"},
+    )
+    assert by_time.status_code == 200
+    assert [s["title"] for s in by_time.json()] == [
+        "오사카성", "점심"
+    ]
+
+def test_schedule_sort_other_user_forbidden(
+    client,
+    auth_headers,
+    second_auth_headers,
+):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    response = client.get(
+        f"/trip-days/{day_id}/schedules",
+        headers=second_auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert response.status_code == 404
+
+def test_schedule_sort_after_reorder(client, auth_headers):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    first = create_day15_schedule(
+        client, auth_headers, day_id,
+        "오사카성", "09:00", "11:00", 0,
+    )
+    second = create_day15_schedule(
+        client, auth_headers, day_id,
+        "점심", "12:00", "13:00", 1,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    first_id = first.json()["id"]
+    second_id = second.json()["id"]
+
+    response = client.put(
+        f"/trip-days/{day_id}/schedules/reorder",
+        headers=auth_headers,
+        json={
+            "schedules": [
+                {"schedule_id": first_id, "order_index": 1},
+                {"schedule_id": second_id, "order_index": 0},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+
+    url = f"/trip-days/{day_id}/schedules"
+
+    manual = client.get(
+        url,
+        headers=auth_headers,
+        params={"sort_by": "manual"},
+    )
+
+    by_time = client.get(
+        url,
+        headers=auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert manual.status_code == 200
+    assert by_time.status_code == 200
+
+    assert [s["title"] for s in manual.json()] == [
+        "점심", "오사카성"
+    ]
+
+    assert [s["title"] for s in by_time.json()] == [
+        "오사카성", "점심"
+    ]
+
+def test_schedule_sort_other_user_forbidden(
+    client,
+    auth_headers,
+    second_auth_headers,
+):
+    day_id = create_day15_trip_day(client, auth_headers)
+
+    response = client.get(
+        f"/trip-days/{day_id}/schedules",
+        headers=second_auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert response.status_code == 404

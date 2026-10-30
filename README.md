@@ -2845,3 +2845,717 @@ return search_places_service(query=query, latitude=latitude, longitude=longitude
 
 테스트에서는 `unittest.mock.patch`로 Google API 호출을 모의 응답으로 대체했다.
 최종 `pytest -v` 전체 테스트 통과를 확인했다.
+
+
+# TripCS Day 14 - Google Places API 장애 대응 및 자동 재시도
+
+## 1. 오늘 목표
+
+Day 13에서는 `Trip` 생성 시 목적지 좌표를 DB에 저장해서 장소 검색 때마다 Google Places API를 두 번 호출하던 구조를 개선했다.
+
+Day 14에서는 **외부 API가 일시적으로 실패해도 여행 생성·수정을 계속할 수 있도록** fallback을 적용하고, **일시적인 장애에 한해서 제한적으로 재시도**하도록 개선했다.
+
+오늘 구현한 내용:
+
+- Trip 생성 시 Google 좌표 조회에 실패해도 여행 데이터 저장
+- Trip 목적지 수정 시 Google 좌표 조회 실패하면 새 목적지만 저장하고 이전 좌표는 `None`으로 초기화
+- Google Places 요청·예외 처리 공통 함수 `request_google_places()` 분리
+- HTTP 오류 / 타임아웃 / 연결 실패를 구분
+- 429·5xx·Timeout에 최대 3회 재시도
+- Exponential Backoff(0.2초 → 0.4초) 적용
+- Mock과 `pytest.mark.parametrize`로 장애 상황 검증
+- 전체 `pytest -v` 통과
+
+---
+
+## 2. 기존 구조의 문제
+
+Day 13에서는 Trip 생성 시 Google Places에 목적지 좌표를 요청했다.
+
+```text
+Trip 생성 요청
+    ↓
+resolve_destination_coordinates("오사카")
+    ↓
+Google Places 장애 발생
+    ↓
+HTTPException 발생
+    ↓
+Trip 생성 실패
+```
+
+좌표 조회는 편의 기능이지만, 해당 기능의 장애가 핵심 기능인 **여행 생성 전체를 막는 문제**가 있었다.
+
+오늘은 여행 생성과 외부 API 장애의 영향을 분리하는 방향으로 개선했다.
+
+---
+
+## 3. Trip 생성·수정 fallback
+
+파일: `backend/services/trip.py`
+
+반복되는 오류 처리 코드를 공통 함수로 분리했다.
+
+```python
+from fastapi import HTTPException
+from backend.services.place import resolve_destination_coordinates
+
+
+def get_destination_coordinates_with_fallback(
+    destination: str,
+) -> tuple[float | None, float | None]:
+    try:
+        return resolve_destination_coordinates(destination)
+
+    except HTTPException as exc:
+        if exc.status_code not in (502, 503, 504):
+            raise
+
+        return None, None
+```
+
+- 정상 응답 → `(latitude, longitude)` 반환
+- 허용한 외부 API 오류(502·503·504) → `(None, None)` 반환
+- 그 외 오류 → `raise`로 다시 전달
+
+Trip 생성 함수에서 사용한다.
+
+```python
+destination_latitude, destination_longitude = (
+    get_destination_coordinates_with_fallback(
+        trip_data.destination
+    )
+)
+
+new_trip = Trip(
+    user_id=current_user.id,
+    title=trip_data.title,
+    destination=trip_data.destination,
+    destination_latitude=destination_latitude,
+    destination_longitude=destination_longitude,
+    start_date=trip_data.start_date,
+    end_date=trip_data.end_date,
+)
+```
+
+이제 좌표 조회에 실패해도 기존 `db.flush()` → `TripDay` 생성 → `db.commit()` 흐름을 이어갈 수 있다.
+
+### 목적지 변경 시 주의할 점
+
+기존 오사카 여행을 도쿄로 바꾸는데 도쿄 좌표를 조회하지 못했다면, 예전 오사카 좌표를 유지하면 안 된다.
+
+```python
+destination_changed = (
+    trip.destination != trip_data.destination
+)
+
+if destination_changed:
+    destination_latitude, destination_longitude = (
+        get_destination_coordinates_with_fallback(
+            trip_data.destination
+        )
+    )
+
+# 기존 DB 수정 흐름 안에서
+trip.destination = trip_data.destination
+
+if destination_changed:
+    trip.destination_latitude = destination_latitude
+    trip.destination_longitude = destination_longitude
+```
+
+좌표 조회가 실패하면 두 좌표가 `None`이므로, **새 목적지에 이전 목적지의 좌표가 잘못 남는 문제**를 피한다.
+
+---
+
+## 4. Google Places 요청 함수 공통화
+
+파일: `backend/services/place.py`
+
+기존에는 `resolve_destination_coordinates()`와 `search_places_service()`가 각각 `httpx.post()`와 예외 처리를 직접 수행했다.
+
+```text
+이전
+resolve_destination_coordinates() → httpx.post() + 예외 처리
+search_places_service()         → httpx.post() + 예외 처리
+
+변경
+resolve_destination_coordinates() ─┐
+                                   ├→ request_google_places()
+search_places_service() ───────────┘
+```
+
+공통 함수는 요청을 전송하고, 성공하면 JSON을 반환하고, 실패하면 상황에 맞는 `HTTPException`을 발생시킨다.
+
+호출 예시:
+
+```python
+data = request_google_places(
+    body={
+        "textQuery": destination,
+        "languageCode": "ko",
+        "pageSize": 1,
+    },
+    field_mask="places.location",
+)
+```
+
+이렇게 하면 공통 오류 처리 정책을 한 곳에서 관리할 수 있다.
+
+---
+
+## 5. HTTP 오류 구분
+
+Google Places API 오류를 우리 API의 오류로 변환했다.
+
+| Google/API 상황 | TripCS 응답 | 재시도 |
+|---|---|---|
+| 400, 403 등 일반 HTTP 오류 | 502 Bad Gateway | 없음 |
+| 429 호출 제한 | 503 Service Unavailable | 최대 3회 |
+| 500 이상 서버 오류 | 503 Service Unavailable | 최대 3회 |
+| Timeout | 504 Gateway Timeout | 최대 3회 |
+| 일반 연결 실패 (`RequestError`) | 502 Bad Gateway | 없음 |
+
+핵심 예외 처리:
+
+```python
+except httpx.TimeoutException as exc:
+    # 마지막 시도까지 실패하면 504
+    ...
+
+except httpx.HTTPStatusError as exc:
+    google_status = exc.response.status_code
+    if google_status == 429 or google_status >= 500:
+        # 마지막 시도까지 실패하면 503
+        ...
+    else:
+        # 400, 403 등은 즉시 502
+        ...
+
+except httpx.RequestError as exc:
+    # 연결 실패는 즉시 502
+    ...
+```
+
+`TimeoutException`은 `RequestError` 계열이므로 **더 구체적인 예외를 먼저 검사**한다.
+
+> 주의: 현재 구현은 Google의 400·403도 502로 변환한다. 그 결과 Trip의 fallback 함수가 이 오류까지 허용하게 된다. 실제 운영에서는 API Key 설정·권한 문제와 일시적 장애를 별도로 구분하는 개선이 필요하다.
+
+---
+
+## 6. Retry와 Exponential Backoff
+
+일시적 오류가 발생했을 때 최대 세 번 요청하도록 구성했다.
+
+```python
+import time
+
+max_attempts = 3
+
+for attempt in range(max_attempts):
+    try:
+        response = httpx.post(
+            GOOGLE_PLACES_SEARCH_URL,
+            headers=headers,
+            json=body,
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except httpx.TimeoutException as exc:
+        if attempt == max_attempts - 1:
+            raise HTTPException(
+                status_code=504,
+                detail="Google Places API timeout",
+            ) from exc
+
+    except httpx.HTTPStatusError as exc:
+        google_status = exc.response.status_code
+
+        if google_status == 429 or google_status >= 500:
+            if attempt == max_attempts - 1:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Google Places API temporarily unavailable",
+                ) from exc
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail="Google Places API request failed",
+            ) from exc
+
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Google Places API connection failed",
+        ) from exc
+
+    time.sleep(0.2 * (2 ** attempt))
+```
+
+**최대 3회**는 최초 요청까지 포함한 횟수다.
+
+```text
+1번째 요청 실패 → 0.2초 대기
+2번째 요청 실패 → 0.4초 대기
+3번째 요청 실패 → 최종 오류 반환 (추가 대기 없음)
+```
+
+`0.2 * (2 ** attempt)`는 실패가 이어질수록 대기 시간을 늘리는 **지수 백오프** 계산식이다.
+
+성공하면 `return response.json()`으로 루프를 즉시 종료하므로 불필요한 재요청을 하지 않는다.
+
+---
+
+## 7. Mock 테스트
+
+파일:
+
+```text
+tests/test_trip.py
+tests/test_place.py
+```
+
+실제 Google API를 호출하면 네트워크 상태, 쿼터, 비용 등에 영향을 받기 때문에 `unittest.mock.patch`를 사용했다.
+
+### Trip 생성·수정 fallback 테스트
+
+- `test_create_trip_when_google_api_fails`: 좌표 조회 502여도 Trip 생성 201, 좌표는 `None`
+- `test_update_trip_when_google_api_fails`: 오사카 → 도쿄 수정 중 502여도 200, 목적지는 도쿄로 변경하고 좌표 초기화
+
+### HTTP 오류 매개변수 테스트
+
+```python
+@pytest.mark.parametrize(
+    "google_status, expected_status, expected_calls",
+    [
+        (400, 502, 1),
+        (403, 502, 1),
+        (429, 503, 3),
+        (500, 503, 3),
+        (503, 503, 3),
+    ],
+)
+```
+
+`parametrize`를 사용하면 하나의 테스트 함수를 서로 다른 오류 코드에 반복 실행할 수 있다.
+
+### Retry 성공 테스트
+
+```python
+mock_post.side_effect = [
+    httpx.Response(503, request=request),
+    httpx.Response(
+        200,
+        request=request,
+        json={"places": []},
+    ),
+]
+
+# 첫 호출 503 → 두 번째 호출 200
+assert mock_post.call_count == 2
+mock_sleep.assert_called_once_with(0.2)
+```
+
+`time.sleep()`도 Mock으로 대체하여 테스트 실행 중 실제로 기다리지 않게 했다.
+
+### 요청 횟수 검증 기준
+
+```text
+400 / 403       → 1회
+429 / 5xx       → 3회 (계속 실패할 때)
+Timeout         → 3회 (계속 실패할 때)
+ConnectError    → 1회
+503 → 200       → 2회 (복구 성공)
+```
+
+---
+
+## 9. 전체 테스트
+
+프로젝트 루트(`D:\\code\\python\\trip_planner`)에서 실행:
+
+```powershell
+pytest tests/test_place.py -v
+pytest tests/test_trip.py -v
+pytest -v
+```
+
+Day 14 작업 후 전체 테스트 통과를 확인했다. 실제 Google API가 아닌 Mock 응답을 이용해 오류·재시도 흐름을 검증했다.
+
+---
+
+## 10. 현재 구조
+
+```text
+사용자 Trip 생성 / 목적지 수정
+             ↓
+get_destination_coordinates_with_fallback()
+             ↓
+resolve_destination_coordinates()
+             ↓
+request_google_places()
+             ↓
+Google Places API 요청 (최대 3회)
+             ↓
+     ┌───────┴────────┐
+   성공              최종 실패
+     ↓                   ↓
+  좌표 저장           좌표 None
+     └───────┬──────────┘
+             ↓
+         Trip 저장
+```
+
+장소 검색은 Trip에 저장된 좌표를 재사용한다. Google 장소 검색 자체가 최종 실패하면 그 검색 요청에는 502·503·504 등을 반환한다.
+
+---
+
+# TripCS Day 15 - Schedule 종료 시간 및 일정 충돌 검증
+
+## 1. 오늘 목표
+
+Day 15에서는 기존 Schedule의 시작 시간(`start_time`)에 종료 시간(`end_time`)을 추가하고, 같은 여행 날짜(`TripDay`) 안에서 일정 시간이 겹치지 않도록 검증했다.
+
+완료한 작업:
+
+- `Schedule.end_time` 컬럼 추가
+- Alembic migration 생성 및 PostgreSQL 적용
+- `ScheduleCreate` / `ScheduleUpdate` / `ScheduleResponse`에 `end_time` 반영
+- 종료 시간이 시작 시간보다 늦은지 Pydantic에서 검증
+- Schedule 생성·수정 시 시간 충돌 검사
+- 수정할 때 현재 Schedule 자신을 충돌 대상에서 제외
+- 기존 Place 검증, 삭제 및 reorder 기능 유지
+- 정상·충돌·경계 시간·수정·다른 날짜·종료 시간 누락 테스트 추가
+- `pytest` 전체 테스트 통과
+
+---
+
+## 2. 기존 Schedule 구조의 한계
+
+Day 14까지 Schedule에는 시작 시간만 있었다.
+
+```text
+Schedule
+├── title
+├── start_time
+├── place_id
+├── memo
+└── order_index
+```
+
+이 상태에서는 일정이 언제 끝나는지 알 수 없으므로 다음처럼 두 일정이 겹쳐도 확인하기 어려웠다.
+
+```text
+오사카성 관광   09:00 ~ 11:00
+점심 식사      10:30 ~ 12:00
+                      ↑ 30분 겹침
+```
+
+Day 15에서는 `end_time`을 추가해 일정의 시간 구간을 다루기 시작했다.
+
+---
+
+## 3. Schedule 모델과 DB 변경
+
+파일: `backend/models.py`
+
+기존 `start_time` 아래에 `end_time`을 추가했다.
+
+```python
+start_time: Mapped[time | None] = mapped_column(
+    Time,
+    nullable=True,
+)
+
+end_time: Mapped[time | None] = mapped_column(
+    Time,
+    nullable=True,
+)
+```
+
+`nullable=True`로 설정한 이유는 기존에 생성된 일정에는 종료 시간 정보가 없기 때문이다. 기존 데이터를 삭제하거나 강제로 종료 시간을 채우지 않고 변경 사항을 적용할 수 있다.
+
+
+## 4. Pydantic Schema 변경
+
+파일: `backend/schemas/schedule.py`
+
+```python
+# ScheduleCreate
+start_time: time | None = None
+end_time: time | None = None
+
+# ScheduleUpdate
+start_time: time | None = None
+end_time: time | None = None
+
+# ScheduleResponse
+start_time: time | None
+end_time: time | None
+```
+
+Schedule 생성 및 수정 Schema에 시간 범위 검증을 추가했다.
+
+```python
+from pydantic import model_validator
+
+@model_validator(mode="after")
+def validate_time_range(self):
+    if self.start_time is not None and self.end_time is not None:
+        if self.end_time <= self.start_time:
+            raise ValueError(
+                "end_time must be later than start_time"
+            )
+    return self
+```
+
+검증 기준:
+
+```text
+09:00 ~ 11:00  → 정상
+11:00 ~ 11:00  → 오류
+15:00 ~ 13:00  → 오류
+09:00 ~ None   → 허용 (기존 데이터 호환)
+```
+
+잘못된 시간 범위로 API 요청을 보내면 FastAPI의 입력 검증 단계에서 `422` 응답이 발생한다.
+
+현재 정책은 **같은 날짜 안에서 시작하고 종료하는 일정**을 기준으로 한다. 자정을 넘기는 일정은 별도 정책이 필요하다.
+
+---
+
+## 5. 일정 시간 충돌 검사 함수
+
+파일: `backend/services/schedule.py`
+
+충돌 검사를 여러 함수에서 재사용하기 위해 `validate_schedule_conflict()`를 분리했다.
+
+```python
+from datetime import time
+
+
+def validate_schedule_conflict(
+    db: Session,
+    trip_day_id: int,
+    start_time: time | None,
+    end_time: time | None,
+    exclude_schedule_id: int | None = None,
+) -> None:
+    if start_time is None or end_time is None:
+        return
+
+    query = db.query(Schedule).filter(
+        Schedule.trip_day_id == trip_day_id,
+        Schedule.start_time.isnot(None),
+        Schedule.end_time.isnot(None),
+        Schedule.start_time < end_time,
+        Schedule.end_time > start_time,
+    )
+
+    if exclude_schedule_id is not None:
+        query = query.filter(
+            Schedule.id != exclude_schedule_id
+        )
+
+    existing_schedule = query.first()
+
+    if existing_schedule:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Schedule time conflicts with an existing schedule",
+        )
+```
+
+### 충돌 판단 조건
+
+두 일정 A(기존 일정), B(새 일정)가 겹치는 조건:
+
+```python
+existing.start_time < new.end_time and existing.end_time > new.start_time
+```
+
+SQLAlchemy에서는 이를 쿼리 조건으로 검사한다.
+
+```python
+Schedule.start_time < end_time,
+Schedule.end_time > start_time,
+```
+
+예시:
+
+| 기존 일정 | 새 일정 | 결과 |
+|---|---|---|
+| 09:00~11:00 | 10:30~12:00 | 충돌 → 400 |
+| 09:00~11:00 | 11:00~12:00 | 허용 → 201 |
+| 09:00~11:00 | 13:00~15:00 | 허용 → 201 |
+
+종료 시각과 다음 일정 시작 시각이 **정확히 같으면 겹치지 않는 것으로 처리**한다.
+
+---
+
+
+# TripCS Day 16 - Schedule 정렬 옵션 및 조회 API 개선
+
+## 1. 오늘 목표
+
+Day 15에서 일정의 시작·종료 시간과 충돌 검사를 구현했다. Day 16에서는 사용자가 직접 지정한 순서와 실제 시작 시간 순서를 구분하여 일정 목록을 조회할 수 있도록 개선했다.
+
+완료한 작업:
+
+- `GET /trip-days/{trip_day_id}/schedules`에 `sort_by` 쿼리 파라미터 추가
+- `manual` / `time` 두 가지 정렬 지원
+- 기존 사용자를 위해 기본값을 `manual`로 설정
+- 시작 시간이 없는 일정은 시간순 정렬에서 마지막에 배치
+- Router의 직접 DB 조회를 Service 함수로 분리
+- 기존 `get_owned_trip_day()` 소유권 검사 유지
+- 기존 Schedule reorder 기능 유지 및 정렬 옵션 독립성 확인
+- 잘못된 정렬 옵션에 422 응답 확인
+- 다른 사용자 접근 시 404 응답 확인
+- 전체 pytest 통과
+
+---
+
+## 2. 기존 방식의 한계
+
+기존 목록 조회 Router는 다음과 같이 정렬했다.
+
+```python
+schedules = (
+    db.query(Schedule)
+    .filter(Schedule.trip_day_id == trip_day.id)
+    .order_by(Schedule.order_index, Schedule.start_time)
+    .all()
+)
+```
+
+이 방식에서는 `order_index`가 우선이므로, 사용자가 실제 시작 시간순으로 일정을 보고 싶어도 별도 선택지가 없었다.
+
+`order_index`는 **사용자 수동 순서**, `start_time`은 **일정 시작 시각**이라는 서로 다른 의미를 가진다.
+
+---
+
+## 3. API 변경
+
+기존 엔드포인트를 그대로 사용하고 쿼리 파라미터만 추가했다.
+
+```http
+GET /trip-days/{trip_day_id}/schedules
+GET /trip-days/{trip_day_id}/schedules?sort_by=manual
+GET /trip-days/{trip_day_id}/schedules?sort_by=time
+```
+
+- `manual`: `order_index` 오름차순, 동률이면 `id` 오름차순
+- `time`: `start_time` 오름차순, 시간이 없으면 마지막, 동률이면 `order_index`와 `id`로 정렬
+- 파라미터 생략: `manual` 적용
+- `random`처럼 허용하지 않은 옵션: 422 반환
+
+기본값을 기존 수동 정렬로 유지하여 API 사용 방식의 하위 호환성을 확보했다.
+
+---
+
+## 4. Router 수정
+
+파일: `backend/routers/schedule.py`
+
+```python
+from typing import Literal
+
+from backend.services.schedule import get_schedules_sorted_service
+
+@router.get("", response_model=list[ScheduleResponse])
+def get_schedules(
+    trip_day_id: int,
+    sort_by: Literal["manual", "time"] = "manual",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip_day = get_owned_trip_day(
+        db=db,
+        trip_day_id=trip_day_id,
+        user_id=current_user.id,
+    )
+
+    return get_schedules_sorted_service(
+        db=db,
+        trip_day_id=trip_day.id,
+        sort_by=sort_by,
+    )
+```
+
+`Literal["manual", "time"]`을 사용하면 FastAPI/Pydantic이 허용된 값만 받도록 검증한다.
+
+Router는 요청과 인증·소유권 검사를 처리하고, 정렬에 관한 DB 조회는 Service에 위임했다.
+
+---
+
+## 5. Service에 정렬 함수 추가
+
+파일: `backend/services/schedule.py`
+
+```python
+from typing import Literal
+from sqlalchemy import nulls_last
+
+
+def get_schedules_sorted_service(
+    db: Session,
+    trip_day_id: int,
+    sort_by: Literal["manual", "time"] = "manual",
+) -> list[Schedule]:
+    query = db.query(Schedule).filter(
+        Schedule.trip_day_id == trip_day_id
+    )
+
+    if sort_by == "time":
+        query = query.order_by(
+            nulls_last(Schedule.start_time.asc()),
+            Schedule.order_index.asc(),
+            Schedule.id.asc(),
+        )
+    else:
+        query = query.order_by(
+            Schedule.order_index.asc(),
+            Schedule.id.asc(),
+        )
+
+    return query.all()
+```
+
+주요 개념:
+
+- `.filter()`: 해당 TripDay의 일정만 조회한다.
+- `.asc()`: 오름차순 정렬이다.
+- `nulls_last()`: 시작 시간이 `NULL`인 항목을 맨 뒤로 보낸다.
+- `Schedule.id.asc()`: 앞의 정렬 값이 같을 때 결과 순서를 안정적으로 결정한다.
+- `.all()`: 조회 결과를 리스트로 반환한다.
+
+---
+
+## 6. pytest 테스트
+
+파일: `tests/test_schedule.py`
+
+검증한 내용:
+
+1. 수동 정렬이 `order_index` 순서로 반환되는가?
+2. 시간순 정렬이 `start_time` 순서로 반환되는가?
+3. 시간 미정(`None`) 일정은 시간순 결과의 마지막에 나오는가?
+4. 허용하지 않은 `sort_by` 값은 422를 반환하는가?
+5. Reorder 뒤 수동 순서가 변경되는가?
+6. Reorder 뒤에도 시간순 정렬은 영향을 받지 않는가?
+7. 다른 사용자가 일정 목록을 조회하면 404를 반환하는가?
+8. 기존 Day 1~15 기능에 회귀 오류가 없는가?
+
+실행 명령:
+
+```powershell
+pytest tests/test_schedule.py -v
+pytest -v
+```
+
+최종 결과: **전체 테스트 통과**. 구체적인 통과 개수는 실행 로그를 별도로 기록하지 않았다.
+
+---
+

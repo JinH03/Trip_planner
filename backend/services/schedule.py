@@ -10,7 +10,34 @@ from backend.schemas.schedule import (
     ScheduleReorderRequest,
     ScheduleUpdate,
 )
+from typing import Literal
+from sqlalchemy import nulls_last
 
+
+def get_schedules_sorted_service(
+    db: Session,
+    trip_day_id: int,
+    sort_by: Literal["manual", "time"] = "manual",
+) -> list[Schedule]:
+
+    query = db.query(Schedule).filter(
+        Schedule.trip_day_id == trip_day_id
+    )
+
+    if sort_by == "time":
+        query = query.order_by(
+            nulls_last(Schedule.start_time.asc()),
+            Schedule.order_index.asc(),
+            Schedule.id.asc(),
+        )
+
+    else:
+        query = query.order_by(
+            Schedule.order_index.asc(),
+            Schedule.id.asc(),
+        )
+
+    return query.all()
 
 def validate_schedule_conflict(
     db: Session,
