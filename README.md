@@ -3559,3 +3559,184 @@ pytest -v
 
 ---
 
+
+# TripCS Day 17 - Trip 상세 조회 정렬 옵션 통합
+
+## 1. 오늘 목표
+
+Day 16에서는 **특정 TripDay의 Schedule 목록 조회**에서 `sort_by=manual | time`을 지원했다. Day 17에서는 같은 정렬 옵션을 **여행 전체 상세 조회**인 `GET /trips/{trip_id}/detail`에도 적용하여, 화면에 표시되는 일정 순서가 API별로 달라지지 않도록 개선했다.
+
+완료한 작업:
+
+- Trip 상세 조회 API에 `sort_by` 쿼리 파라미터 추가
+- 기본값 `manual`로 기존 호출 방식 유지
+- 날짜(`TripDay`)는 항상 `day_number` 오름차순 정렬
+- 각 날짜의 Schedule은 `manual` 또는 `time`에 따라 별도 정렬
+- `start_time=None`인 일정은 시간순 조회에서 맨 뒤로 배치
+- 동일한 시작 시간에는 `order_index`, `id`를 보조 정렬 키로 사용
+- 기존 `joinedload()`와 사용자 소유권 검사 유지
+- 잘못된 정렬 옵션 422, 다른 사용자 접근 404 확인
+- pytest 전체 **68 passed** 확인
+
+---
+
+## 2. 기존 구조의 한계
+
+Day 16에서 다음 API는 정렬 방식을 선택할 수 있었다.
+
+```http
+GET /trip-days/{trip_day_id}/schedules?sort_by=time
+```
+
+반면 여행 전체를 조회하는 다음 API는 정렬 옵션을 받지 않았다.
+
+```http
+GET /trips/{trip_id}/detail
+```
+
+따라서 사용자가 여행 전체 화면을 열었을 때도 **수동순 또는 시간순을 선택할 수 있도록** 상세 조회 API를 확장했다.
+
+---
+
+## 3. API 변경
+
+```http
+GET /trips/{trip_id}/detail
+GET /trips/{trip_id}/detail?sort_by=manual
+GET /trips/{trip_id}/detail?sort_by=time
+```
+
+| 요청 | 동작 |
+| --- | --- |
+| 옵션 없음 | `manual` 기본 적용 |
+| `sort_by=manual` | `order_index`, `id` 순 |
+| `sort_by=time` | `start_time`, `order_index`, `id` 순; 시간 미정은 마지막 |
+| `sort_by=random` | 422 응답 |
+
+날짜는 Schedule 정렬 옵션과 무관하게 `day_number` 기준으로 정렬한다.
+
+---
+
+## 4. Router에서 정렬 옵션 받기
+
+파일: `backend/routers/trip.py`
+
+```python
+from datetime import time
+from typing import Literal
+
+@router.get(
+    "/{trip_id}/detail",
+    response_model=TripDetailResponse,
+)
+def get_trip_detail(
+    trip_id: int,
+    sort_by: Literal["manual", "time"] = "manual",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ...
+```
+
+`Literal["manual", "time"]`으로 허용되는 정렬 방식만 제한한다. 값이 잘못되면 FastAPI의 요청 검증 단계에서 422가 반환된다. 기본값을 `manual`로 설정하여 기존 클라이언트도 정렬 옵션 없이 호출할 수 있다.
+
+---
+
+## 5. 소유권 검사와 eager loading 유지
+
+기존 상세 조회 쿼리는 유지했다.
+
+```python
+trip = (
+    db.query(Trip)
+    .options(
+        joinedload(Trip.days)
+        .joinedload(TripDay.schedules)
+        .joinedload(Schedule.place_info)
+    )
+    .filter(
+        Trip.id == trip_id,
+        Trip.user_id == current_user.id,
+    )
+    .first()
+)
+
+if not trip:
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Trip not found",
+    )
+```
+
+- `Trip.id == trip_id`: 조회할 여행을 지정한다.
+- `Trip.user_id == current_user.id`: 로그인 사용자의 여행만 조회한다.
+- `joinedload()`: Trip → TripDay → Schedule → Place 관계를 함께 로딩하여 관계 접근 시 반복 조회가 발생하는 문제를 줄인다.
+- 결과가 없으면 404를 반환한다. 다른 사용자의 여행 존재 여부도 노출하지 않는다.
+
+---
+
+## 6. TripDay는 날짜 순으로 고정
+
+```python
+trip.days.sort(
+    key=lambda day: day.day_number
+)
+```
+
+`sort_by`는 날짜 내부의 Schedule 순서만 바꾸며, TripDay의 날짜 순서는 항상 유지한다.
+
+---
+
+## 7. Schedule의 두 가지 정렬
+
+```python
+for day in trip.days:
+    if sort_by == "time":
+        day.schedules.sort(
+            key=lambda schedule: (
+                schedule.start_time is None,
+                schedule.start_time or time.max,
+                schedule.order_index,
+                schedule.id,
+            )
+        )
+    else:
+        day.schedules.sort(
+            key=lambda schedule: (
+                schedule.order_index,
+                schedule.id,
+            )
+        )
+```
+
+### 수동순 (`manual`)
+
+1. `order_index`: 사용자가 정한 순서
+2. `id`: 순서가 같을 때 결과를 일정하게 만드는 보조 기준
+
+### 시간순 (`time`)
+
+1. `schedule.start_time is None`: 시간이 있는 일정이 먼저 오도록 정렬
+2. `schedule.start_time or time.max`: 시작 시간이 빠른 순서
+3. `order_index`: 같은 시작 시간일 때 수동 순서 사용
+4. `id`: 최종 보조 정렬 기준
+
+파이썬의 튜플 정렬은 **왼쪽 값부터 차례로 비교**한다. `False`가 `True`보다 먼저 정렬되므로 `start_time is None` 조건으로 시간이 없는 일정을 맨 뒤에 둘 수 있다.
+
+예시:
+
+| 일정 | 시작 시간 | order_index |
+| --- | --- | ---: |
+| 쇼핑 | 16:00 | 0 |
+| 오사카성 | 09:00 | 1 |
+| 점심 | 12:00 | 2 |
+
+- `manual` 결과: **쇼핑 → 오사카성 → 점심**
+- `time` 결과: **오사카성 → 점심 → 쇼핑**
+
+시간이 정해지지 않은 일정은 `time` 정렬 시 맨 마지막에 표시한다.
+
+---
+
+
+

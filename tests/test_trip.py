@@ -636,3 +636,153 @@ def test_update_trip_when_google_api_fails(
 
     assert detail_response.status_code == 200
     assert detail_response.json()["destination"] == "도쿄"
+
+
+def create_day17_trip(client, auth_headers):
+    response = client.post(
+        "/trips",
+        headers=auth_headers,
+        json={
+            "title": "오사카 여행",
+            "destination": "오사카",
+            "start_date": "2026-11-01",
+            "end_date": "2026-11-02",
+        },
+    )
+    assert response.status_code == 201
+
+    trip_id = response.json()["id"]
+
+    detail = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+    )
+    assert detail.status_code == 200
+
+    day_ids = [day["id"] for day in detail.json()["days"]]
+    return trip_id, day_ids
+
+
+def create_day17_schedule(
+    client, auth_headers, day_id,
+    title, start_time, end_time, order_index
+):
+    response = client.post(
+        f"/trip-days/{day_id}/schedules",
+        headers=auth_headers,
+        json={
+            "title": title,
+            "start_time": start_time,
+            "end_time": end_time,
+            "order_index": order_index,
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+def test_trip_detail_sort_manual_and_time(client, auth_headers):
+    trip_id, day_ids = create_day17_trip(client, auth_headers)
+    day_id = day_ids[0]
+
+    create_day17_schedule(
+        client, auth_headers, day_id,
+        "쇼핑", "16:00", "17:00", 0
+    )
+    create_day17_schedule(
+        client, auth_headers, day_id,
+        "오사카성", "09:00", "11:00", 1
+    )
+    create_day17_schedule(
+        client, auth_headers, day_id,
+        "점심", "12:00", "13:00", 2
+    )
+
+    url = f"/trips/{trip_id}/detail"
+
+    manual = client.get(
+        url, headers=auth_headers,
+        params={"sort_by": "manual"}
+    )
+    by_time = client.get(
+        url, headers=auth_headers,
+        params={"sort_by": "time"}
+    )
+
+    assert manual.status_code == 200
+    assert by_time.status_code == 200
+
+    assert [
+        s["title"] for s in manual.json()["days"][0]["schedules"]
+    ] == ["쇼핑", "오사카성", "점심"]
+
+    assert [
+        s["title"] for s in by_time.json()["days"][0]["schedules"]
+    ] == ["오사카성", "점심", "쇼핑"]
+
+def test_trip_detail_sort_time_nulls_last(client, auth_headers):
+    trip_id, day_ids = create_day17_trip(client, auth_headers)
+    day_id = day_ids[0]
+
+    create_day17_schedule(
+        client, auth_headers, day_id,
+        "시간 미정", None, None, 0
+    )
+    create_day17_schedule(
+        client, auth_headers, day_id,
+        "오전 관광", "09:00", "10:00", 1
+    )
+    create_day17_schedule(
+        client, auth_headers, day_id,
+        "오후 관광", "14:00", "15:00", 2
+    )
+
+    response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert response.status_code == 200
+    assert [
+        s["title"] for s in response.json()["days"][0]["schedules"]
+    ] == ["오전 관광", "오후 관광", "시간 미정"]
+
+
+def test_trip_detail_sort_invalid_option(client, auth_headers):
+    trip_id, _ = create_day17_trip(client, auth_headers)
+
+    response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+        params={"sort_by": "random"},
+    )
+
+    assert response.status_code == 422
+
+def test_trip_detail_empty_days(client, auth_headers):
+    trip_id, _ = create_day17_trip(client, auth_headers)
+
+    response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert response.status_code == 200
+
+    days = response.json()["days"]
+    assert len(days) == 2
+    assert all(day["schedules"] == [] for day in days)
+
+def test_trip_detail_sort_other_user_forbidden(
+    client, auth_headers, second_auth_headers
+):
+    trip_id, _ = create_day17_trip(client, auth_headers)
+
+    response = client.get(
+        f"/trips/{trip_id}/detail",
+        headers=second_auth_headers,
+        params={"sort_by": "time"},
+    )
+
+    assert response.status_code == 404

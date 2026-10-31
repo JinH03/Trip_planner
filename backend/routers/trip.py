@@ -1,3 +1,7 @@
+
+from datetime import time
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 
@@ -60,12 +64,14 @@ def get_my_trips(
     return trips
 
 
+
 @router.get(
     "/{trip_id}/detail",
     response_model=TripDetailResponse,
 )
 def get_trip_detail(
     trip_id: int,
+    sort_by: Literal["manual", "time"] = "manual",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -82,26 +88,39 @@ def get_trip_detail(
         )
         .first()
     )
+
     if not trip:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Trip not found",
         )
 
+    # TripDay는 항상 날짜 순서
     trip.days.sort(
         key=lambda day: day.day_number
     )
 
+    # Schedule은 요청한 방식으로 정렬
     for day in trip.days:
-        day.schedules.sort(
-            key=lambda schedule: (
-                schedule.order_index,
-                schedule.start_time is None,
-                schedule.start_time,
+        if sort_by == "time":
+            day.schedules.sort(
+                key=lambda schedule: (
+                    schedule.start_time is None,
+                    schedule.start_time or time.max,
+                    schedule.order_index,
+                    schedule.id,
+                )
             )
-        )
+        else:
+            day.schedules.sort(
+                key=lambda schedule: (
+                    schedule.order_index,
+                    schedule.id,
+                )
+            )
 
     return trip
+
 
 
 @router.get(
