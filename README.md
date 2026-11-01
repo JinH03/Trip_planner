@@ -3740,3 +3740,131 @@ for day in trip.days:
 
 
 
+# TripCS Day 18 - 사용자별 장소 즐겨찾기 기능
+
+## 1. 오늘 목표
+
+Day 18에서는 사용자가 Google Places 검색 등으로 저장한 `Place`를 즐겨찾기에 등록하고, 이후 다시 조회하거나 삭제할 수 있도록 기능을 구현했다.
+
+완료한 작업:
+
+- `FavoritePlace` 모델 추가
+- `favorite_places` 테이블 생성 및 Alembic 마이그레이션
+- 사용자와 장소를 연결하는 관계 설계
+- `POST /favorites` 등록 API
+- `GET /favorites` 내 즐겨찾기 목록 API
+- `DELETE /favorites/{place_id}` 삭제 API
+- JWT 인증 및 사용자별 데이터 격리
+- 사용자별 동일 장소 중복 등록 방지
+- `IntegrityError` 처리와 DB 트랜잭션 롤백
+- pytest 테스트 10개 추가
+- 전체 회귀 테스트 **78 passed**
+
+---
+
+## 2. 즐겨찾기 데이터 구조
+
+기존 `Place` 데이터를 복제하지 않고 `User`와 `Place` 사이에 즐겨찾기 관계를 추가했다.
+
+```text
+User (1) ── (N) FavoritePlace (N) ── (1) Place
+```
+
+예시:
+
+| id | user_id | place_id |
+|---|---|---|
+| 1 | 1 | 10 |
+| 2 | 1 | 15 |
+| 3 | 2 | 10 |
+
+서로 다른 사용자가 같은 장소를 즐겨찾기할 수 있지만, 한 사용자가 같은 장소를 중복 등록할 수는 없다.
+
+---
+
+## 3. FavoritePlace 모델
+
+파일: `backend/models.py`
+
+```python
+class FavoritePlace(Base):
+    __tablename__ = "favorite_places"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "place_id",
+            name="uq_favorite_places_user_place",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    place_id: Mapped[int] = mapped_column(
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user: Mapped["User"] = relationship()
+    place: Mapped["Place"] = relationship()
+```
+
+### UniqueConstraint
+
+```python
+UniqueConstraint("user_id", "place_id", name="uq_favorite_places_user_place")
+```
+
+`user_id`와 `place_id`의 **조합**이 중복되지 않도록 DB 수준에서 보호한다.
+
+```text
+(1, 10) → 등록 가능
+(1, 10) → 중복 불가
+(2, 10) → 등록 가능
+```
+
+`ondelete="CASCADE"`는 참조하는 사용자 또는 장소가 DB에서 삭제될 때 관련 즐겨찾기 레코드도 함께 삭제하도록 지정한 외래 키 옵션이다.
+
+---
+
+
+## 4. 자동 테스트
+
+파일: `tests/test_favorite.py`
+
+Swagger 수동 검증 대신 기존 FastAPI `TestClient`와 pytest fixture를 재사용했다. 테스트용 DB를 사용하며, 아래 흐름에서는 실제 Google Places API를 호출하지 않는다.
+
+추가한 테스트 10개:
+
+1. 즐겨찾기 등록 → 201
+2. 즐겨찾기 목록 조회 → 200
+3. 같은 사용자의 중복 등록 → 409
+4. 즐겨찾기 삭제 → 204, 삭제 후 빈 목록
+5. 없는 즐겨찾기 삭제 → 404
+6. 없는 Place 등록 → 404
+7. `place_id=-1` 입력 → 422
+8. 인증 없는 목록 조회 → 401
+9. 다른 사용자 조회·삭제 차단 → 빈 목록 및 404
+10. 서로 다른 사용자가 같은 장소 즐겨찾기 → 모두 201
+
+실행:
+
+```powershell
+pytest tests/test_favorite.py -v
+pytest -v
+```
+
+최종 실행 결과:
+
+```text
+78 passed
+```
+
+---

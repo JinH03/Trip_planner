@@ -342,3 +342,34 @@ class Place(Base):
         default=utc_now,
         nullable=False,
     )
+
+class FavoritePlace(Base):
+    __tablename__ = "favorite_places"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "place_id",
+            name="uq_favorite_places_user_place",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        index=True,
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    place_id: Mapped[int] = mapped_column(
+        ForeignKey("places.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user: Mapped["User"] = relationship()
+    place: Mapped["Place"] = relationship()
