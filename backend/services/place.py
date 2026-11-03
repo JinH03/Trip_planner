@@ -1,11 +1,16 @@
 
+import hashlib
+import json
 import os
+import time
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import HTTPException, status
+from fastapi import HTTPException
+from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
-import time
+
+from backend.cache import get_redis_client
 from backend.models import Place
 from backend.schemas.place import (
     PlaceCreate,
@@ -21,11 +26,49 @@ GOOGLE_PLACES_SEARCH_URL = (
     "https://places.googleapis.com/v1/places:searchText"
 )
 
+# Day19: Redis 캐시 설정
+CACHE_TTL_SECONDS = 1800
+CACHE_KEY_PREFIX = "tripcs:places:v1"
+
+
+def make_place_cache_key(
+    query: str,
+    latitude: float | None,
+    longitude: float | None,
+) -> str:
+    """
+    검색어와 좌표를 이용해 Redis Cache Key를 생성한다.
+    """
+
+    cache_data = {
+        "query": query.strip().lower(),
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    cache_string = json.dumps(
+        cache_data,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+    cache_hash = hashlib.sha256(
+        cache_string.encode("utf-8")
+    ).hexdigest()
+
+    return f"{CACHE_KEY_PREFIX}:{cache_hash}"
+
 
 def request_google_places(
     body: dict,
     field_mask: str,
 ) -> dict:
+    """
+    Google Places API 공통 요청 함수.
+
+    429, 5xx, Timeout은 최대 3회 재시도한다.
+    """
+
     if not GOOGLE_PLACES_API_KEY:
         raise HTTPException(
             status_code=500,
@@ -84,6 +127,7 @@ def request_google_places(
 
     raise RuntimeError("Unexpected retry state")
 
+
 def resolve_destination_coordinates(
     destination: str,
 ) -> tuple[float | None, float | None]:
@@ -123,7 +167,11 @@ def search_places_service(
     """
     Google Places에서 장소를 검색한다.
 
-    좌표가 있으면 locationBias를 적용한다.
+    Day19:
+    - Redis Cache Hit이면 저장된 결과 반환
+    - Cache Miss이면 Google API 호출
+    - 결과를 Redis에 30분간 저장
+    - Redis 장애 시 기존 Google 검색으로 fallback
     """
 
     query = query.strip()
@@ -131,6 +179,34 @@ def search_places_service(
     if not query:
         return []
 
+    # 1. Cache Key 생성
+    cache_key = make_place_cache_key(
+        query=query,
+        latitude=latitude,
+        longitude=longitude,
+    )
+
+    # 2. Redis Cache 조회
+    redis_client = None
+
+    try:
+        redis_client = get_redis_client()
+        cached_data = redis_client.get(cache_key)
+
+        if cached_data is not None:
+            cached_places = json.loads(cached_data)
+
+            return [
+                PlaceSearchResult.model_validate(place)
+                for place in cached_places
+            ]
+
+    except (RedisError, OSError, ValueError, TypeError):
+        # Redis 접속 실패 또는 잘못된 캐시 데이터
+        # → Google API로 검색 진행
+        redis_client = None
+
+    # 3. Google Places 검색 요청 Body
     body = {
         "textQuery": query,
         "languageCode": "ko",
@@ -156,6 +232,7 @@ def search_places_service(
         "places.primaryType"
     )
 
+    # 4. Cache Miss → Google API 호출
     data = request_google_places(
         body=body,
         field_mask=field_mask,
@@ -179,6 +256,27 @@ def search_places_service(
                 external_place_id=place.get("id"),
             )
         )
+
+    # 5. 검색 결과를 Redis에 저장
+    if redis_client is not None:
+        try:
+            cache_value = json.dumps(
+                [
+                    result.model_dump(mode="json")
+                    for result in results
+                ],
+                ensure_ascii=False,
+            )
+
+            redis_client.setex(
+                cache_key,
+                CACHE_TTL_SECONDS,
+                cache_value,
+            )
+
+        except (RedisError, OSError):
+            # Redis 저장 실패는 검색 결과에 영향 없음
+            pass
 
     return results
 
