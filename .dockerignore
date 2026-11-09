@@ -1,0 +1,13 @@
+venv/
+.venv/
+venv_old/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.env
+*.dump
+*.log
+.requirements.txt
+.tripcs_backup.dump
+.질문.txt

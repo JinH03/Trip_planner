@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-
+from unittest.mock import MagicMock, patch
 from backend.database import Base, get_db
 from backend.main import app
 from backend.models import User
@@ -119,3 +119,23 @@ def second_auth_headers(db):
         db=db,
         email="second@example.com",
     )
+
+@pytest.fixture(autouse=True)
+def mock_redis_for_unit_tests(request):
+    """
+    일반 테스트에서는 실제 Redis 접근을 차단한다.
+    Redis 통합 테스트만 실제 Redis를 사용한다.
+    """
+
+    if request.node.path.name == "test_redis_integration.py":
+        yield
+        return
+
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+
+    with patch(
+        "backend.services.place.get_redis_client",
+        return_value=redis_client,
+    ):
+        yield

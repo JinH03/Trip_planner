@@ -3868,3 +3868,55 @@ pytest -v
 ```
 
 ---
+
+
+# TripCS Day20 - Docker 환경 구축
+
+## 1. 오늘 목표
+
+- Docker Desktop 및 WSL2 설치
+- 실제 Redis 서버 연결 및 캐싱 검증
+- FastAPI Docker 이미지 빌드
+- Docker Compose로 FastAPI, PostgreSQL, Redis 구성
+- 테스트 간 Redis 캐시 간섭 해결
+
+## 2. 구현 내용
+
+### Dockerfile
+
+Python 3.12 기반 FastAPI 실행 환경을 구성했다.
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ ./backend/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### Docker Compose
+
+| 서비스 | 역할 |
+|---|---|
+| FastAPI | 백엔드 API 서버 |
+| PostgreSQL | 사용자·여행 데이터 저장 |
+| Redis | Google Places 검색 결과 캐싱 |
+
+컨테이너 간 통신 주소는 `db:5432`, `redis:6379`로 설정했다. 기존 로컬 PostgreSQL DB를 보호하기 위해 Docker DB에는 별도 포트와 볼륨을 사용했다. `.dockerignore`로 `.env`, `venv`, DB 백업 파일 등을 이미지 빌드에서 제외했다.
+
+## 3. Redis 통합 테스트
+
+실제 Redis 컨테이너에서 다음을 확인했다.
+
+- **Cache Miss:** Google API Mock 호출 후 Redis에 저장
+- **Cache Hit:** Google API 재호출 없이 저장된 결과 반환
+- **TTL:** 1,800초(30분) 설정 확인
