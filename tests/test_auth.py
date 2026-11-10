@@ -1,5 +1,12 @@
 from backend.models import User
+import pytest
+from unittest.mock import patch
 
+
+@pytest.fixture(autouse=True)
+def mock_verification_email():
+    with patch("backend.routers.user.send_verification_email"):
+        yield
 
 def test_login_and_access_trips(
     client,
