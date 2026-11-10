@@ -3920,3 +3920,42 @@ CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
 - **Cache Miss:** Google API Mock 호출 후 Redis에 저장
 - **Cache Hit:** Google API 재호출 없이 저장된 결과 반환
 - **TTL:** 1,800초(30분) 설정 확인
+
+
+# TripCS Day21 - GitHub Actions CI 자동 테스트
+
+## 1. 목표
+- GitHub `main` 브랜치에 Push하거나 Pull Request를 생성하면 pytest 자동 실행
+- GitHub Actions에 Python 3.12 및 Redis 테스트 환경 구성
+- 로컬과 CI 환경 차이로 발생한 오류 해결
+
+## 2. 구현 내용
+- `.github/workflows/test.yml` 작성
+- `actions/checkout`, `actions/setup-python`으로 소스 체크아웃 및 Python 환경 구성
+- `requirements.txt` 설치 후 `python -m pytest -v` 실행
+- Redis 서비스 컨테이너를 사용해 Redis 통합 테스트 실행 환경 구성
+- 테스트 DB는 `tests/conftest.py`의 SQLite 인메모리 DB와 FastAPI `get_db` 오버라이드 사용
+- CI용 `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET_KEY`, `GOOGLE_PLACES_API_KEY` 등 환경변수 설정
+
+## 3. 발생한 문제와 해결
+
+**문제 1: JWT 테스트 다수 실패**
+- 원인: CI에서 `SECRET_KEY`를 설정했지만 실제 코드에서는 `JWT_SECRET_KEY`를 요구함
+- 해결: GitHub Actions의 환경변수 이름을 `JWT_SECRET_KEY`로 수정
+
+**문제 2: 회원가입 테스트 실패**
+- 원인: CI에는 `SMTP_HOST`가 없어서 회원가입 시 인증 이메일 발송 코드가 오류 발생
+- 해결: `tests/test_auth.py`에서 `send_verification_email`을 Mock 처리해 실제 SMTP 접속 없이 검증
+
+## 4. 결과
+- 첫 GitHub Actions 실행: **23 passed, 1 failed, 62 errors**
+- 설정 수정 후 GitHub Actions 실행: **Success (초록 체크)**
+- 로컬 기준 테스트 86개; 수정 후 CI에서 정확히 몇 개가 PASSED였는지는 별도 로그 확인 필요
+
+## 5. 배운 점
+- CI(지속적 통합): Push/PR마다 자동으로 테스트해 변경 사항을 검증하는 과정
+- 로컬 `.env`에 의존하지 않도록 CI 전용 환경변수를 명시해야 함
+- 실제 SMTP 같은 외부 의존성은 단위 테스트에서 Mock으로 분리
+- Redis 통합 테스트처럼 실제 서비스가 필요한 테스트는 CI 서비스 컨테이너로 실행
+
+**Day21 핵심:** GitHub Push 후 자동으로 pytest가 실행되는 CI 환경을 구축하고, 로컬과 CI의 환경변수·외부 서비스 차이를 해결했다.
