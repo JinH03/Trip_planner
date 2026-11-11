@@ -3959,3 +3959,95 @@ CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
 - Redis 통합 테스트처럼 실제 서비스가 필요한 테스트는 CI 서비스 컨테이너로 실행
 
 **Day21 핵심:** GitHub Push 후 자동으로 pytest가 실행되는 CI 환경을 구축하고, 로컬과 CI의 환경변수·외부 서비스 차이를 해결했다.
+
+
+# TripCS Day22 — Redis Rate Limiting
+
+## 1. 목표
+
+Google Places 검색 API의 과도한 호출을 방지하기 위해 **Redis 기반 Rate Limiting** 기능을 구현한다.
+
+## 2. 구현 기능
+
+- **대상 API:** `GET /places/search`
+- **제한 기준:** JWT 인증 사용자 ID
+- **요청 제한:** 사용자별 60초 동안 최대 20회
+- **제한 초과:** HTTP `429 Too Many Requests`
+- **재시도 안내:** `Retry-After` 헤더
+- **Redis 장애:** 검색을 허용하는 Fail-open 정책
+- **검색 캐시 적중 여부와 관계없이** 요청 횟수 계산
+
+## 3. 동작 방식
+
+1. JWT 인증을 통해 사용자 ID를 확인한다.
+2. Redis에서 사용자별 요청 횟수를 증가시킨다.
+3. 첫 요청에 60초 TTL을 설정한다.
+4. 20회 이하라면 장소 검색을 허용한다.
+5. 21회부터 HTTP 429와 `Retry-After` 헤더를 반환한다.
+6. TTL이 만료되면 카운터가 초기화된다.
+
+### Redis Key 예시
+
+```text
+tripcs:rate_limit:places:1
+tripcs:rate_limit:places:2
+```
+
+### Lua Script
+
+```lua
+local count = redis.call('INCR', KEYS[1])
+
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+
+local ttl = redis.call('TTL', KEYS[1])
+
+return {count, ttl}
+```
+
+Redis Lua Script를 사용해 `INCR`과 `EXPIRE`를 원자적으로 실행한다.
+
+## 4. 수정 파일
+
+| 파일 | 역할 |
+|---|---|
+| `backend/dependencies/rate_limit.py` | Rate Limiting 로직 |
+| `backend/routers/place.py` | 장소 검색 API에 제한 적용 |
+| `tests/conftest.py` | Redis Mock 설정 |
+| `tests/test_rate_limit.py` | 단위 테스트 7개 |
+| `tests/test_rate_limit_integration.py` | 실제 Redis 통합 테스트 |
+
+## 5. 테스트
+
+검증 항목:
+
+- 20회 요청 허용
+- 21번째 요청 차단
+- `Retry-After` 헤더 반환
+- 사용자별 카운터 분리
+- TTL 만료 상황 재현
+- Redis 장애 시 Fail-open
+- 미인증 요청 차단
+- 실제 Redis에서 Lua Script 및 TTL 확인
+
+### 실행 명령어
+
+```powershell
+python -m pytest tests/test_rate_limit.py -v
+python -m pytest tests/test_rate_limit_integration.py -v
+python -m pytest -v
+```
+
+**로컬 테스트 결과: 94개 통과**
+
+GitHub Actions CI 최종 결과는 별도 확인 필요.
+
+## 6. 배운 점
+
+- Redis를 캐싱뿐 아니라 API 요청 제한에도 활용할 수 있다.
+- Lua Script로 여러 Redis 명령을 원자적으로 처리할 수 있다.
+- HTTP 429와 `Retry-After`를 통해 클라이언트에게 요청 제한 상태를 전달한다.
+- Fail-open 정책은 서비스 가용성을 높이지만 Redis 장애 중에는 요청 제한이 적용되지 않는다.
+- Mock 단위 테스트와 실제 Redis 통합 테스트는 검증 목적이 다르다.
