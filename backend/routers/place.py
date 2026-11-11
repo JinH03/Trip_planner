@@ -1,9 +1,13 @@
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.dependencies.auth import get_current_user
 from backend.dependencies.ownership import get_owned_trip
+from backend.dependencies.rate_limit import (
+    enforce_place_search_rate_limit,
+)
 from backend.models import User
 from backend.schemas.place import (
     PlaceCreate,
@@ -21,6 +25,7 @@ router = APIRouter(
     tags=["places"],
 )
 
+
 @router.post(
     "",
     response_model=PlaceResponse,
@@ -34,7 +39,15 @@ def create_place(
         db=db,
         place_data=place,
     )
-@router.get("/search", response_model=list[PlaceSearchResult])
+
+
+@router.get(
+    "/search",
+    response_model=list[PlaceSearchResult],
+    dependencies=[
+        Depends(enforce_place_search_rate_limit),
+    ],
+)
 def search_places(
     query: str = Query(min_length=1, max_length=100),
     trip_id: int | None = Query(default=None, gt=0),

@@ -127,7 +127,10 @@ def mock_redis_for_unit_tests(request):
     Redis 통합 테스트만 실제 Redis를 사용한다.
     """
 
-    if request.node.path.name == "test_redis_integration.py":
+    if request.node.path.name in {
+        "test_redis_integration.py",
+        "test_rate_limit_integration.py",
+    }:
         yield
         return
 
@@ -137,5 +140,40 @@ def mock_redis_for_unit_tests(request):
     with patch(
         "backend.services.place.get_redis_client",
         return_value=redis_client,
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def mock_redis_for_unit_tests(request):
+    """
+    일반 테스트에서 Redis를 Mock으로 대체한다.
+
+    - 장소 검색 캐시: Cache Miss
+    - Rate Limiting: 요청 허용
+    - 실제 Redis 통합 테스트는 Mock 제외
+    """
+
+    if request.node.path.name == "test_redis_integration.py":
+        yield
+        return
+
+    # 장소 검색 캐시 Mock
+    cache_client = MagicMock()
+    cache_client.get.return_value = None
+
+    # Rate Limiting Mock
+    rate_limit_client = MagicMock()
+    rate_limit_client.eval.return_value = [1, 60]
+
+    with (
+        patch(
+            "backend.services.place.get_redis_client",
+            return_value=cache_client,
+        ),
+        patch(
+            "backend.dependencies.rate_limit.get_redis_client",
+            return_value=rate_limit_client,
+        ),
     ):
         yield
