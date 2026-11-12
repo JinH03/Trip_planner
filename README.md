@@ -4051,3 +4051,103 @@ GitHub Actions CI 최종 결과는 별도 확인 필요.
 - HTTP 429와 `Retry-After`를 통해 클라이언트에게 요청 제한 상태를 전달한다.
 - Fail-open 정책은 서비스 가용성을 높이지만 Redis 장애 중에는 요청 제한이 적용되지 않는다.
 - Mock 단위 테스트와 실제 Redis 통합 테스트는 검증 목적이 다르다.
+
+
+# TripCS Day23 — API Logging & Monitoring
+
+## 1. 목표
+
+FastAPI의 모든 HTTP 요청을 추적할 수 있도록 **Logging Middleware**를 구현한다.
+
+API 응답 시간과 상태 코드를 기록하고, 요청마다 고유한 ID를 부여해 장애 분석에 활용한다.
+
+## 2. 구현 기능
+
+- **Request ID:** 요청마다 UUID 생성
+- **응답 헤더:** `X-Request-ID` 추가
+- **응답 시간:** `time.perf_counter()`로 밀리초 단위 측정
+- **구조화된 로그:** JSON 형식 출력
+- **HTTP 상태 기록:** 200, 401, 429, 500 등
+- **오류 추적:** 처리되지 않은 예외의 종류와 traceback 기록
+- **민감정보 보호:** Authorization 헤더와 URL 쿼리스트링 제외
+
+## 3. 처리 흐름
+
+1. HTTP 요청을 Logging Middleware에서 수신한다.
+2. UUID를 생성하고 요청 시작 시간을 기록한다.
+3. 기존 FastAPI Router에서 요청을 처리한다.
+4. 응답 상태 코드와 처리 시간을 수집한다.
+5. JSON 로그를 출력한다.
+6. 정상적으로 반환된 응답에 `X-Request-ID` 헤더를 추가한다.
+
+## 4. 로그 예시
+
+### 정상 요청
+
+```json
+{
+  "event": "http_request",
+  "request_id": "f7b19d26e91b4a93b6540be0c0a12345",
+  "method": "GET",
+  "path": "/places/search",
+  "status_code": 200,
+  "duration_ms": 12.5
+}
+```
+
+### 처리되지 않은 서버 오류
+
+```json
+{
+  "event": "http_error",
+  "request_id": "f7b19d26e91b4a93b6540be0c0a12345",
+  "method": "GET",
+  "path": "/places/search",
+  "status_code": 500,
+  "duration_ms": null,
+  "error_type": "ValueError",
+  "traceback": "..."
+}
+```
+
+## 5. 주요 파일
+
+| 파일 | 역할 |
+|---|---|
+| `backend/middleware/__init__.py` | Middleware 패키지 |
+| `backend/middleware/logging.py` | JSON Formatter 및 요청 로깅 |
+| `backend/main.py` | Middleware 등록 |
+| `tests/test_logging.py` | 로깅 테스트 5개 |
+
+## 6. 테스트
+
+검증 항목:
+
+- 정상 요청의 `X-Request-ID` 헤더
+- 요청마다 고유한 ID 생성
+- HTTP 429 응답의 Request ID
+- JSON 로그 필드 검증
+- HTTP 500 오류 로그 및 traceback 기록
+
+```powershell
+python -m pytest tests/test_logging.py -v
+python -m pytest -v
+```
+
+**결과:** 로컬 테스트 통과 및 GitHub Actions CI 성공.
+
+Day23까지 전체 테스트 목표는 99개이며, 정확한 통과 개수는 CI의 pytest 로그에서 확인한다.
+
+## 7. 개선할 점
+
+- 현재 미처리 500 오류 응답에는 `X-Request-ID` 헤더가 없을 수 있다.
+- Traceback에 민감정보가 포함되지 않도록 운영 환경에서 로그 필터링을 강화해야 한다.
+- 향후 로그 수집 시스템과 모니터링 대시보드를 연동할 수 있다.
+
+## 8. 배운 점
+
+- FastAPI Middleware를 이용해 공통 요청 처리 로직을 분리하는 방법
+- JSON 구조화 로깅과 Request ID를 통한 요청 추적
+- `time.perf_counter()`를 이용한 응답 시간 측정
+- Exception Logging을 통한 서버 장애 원인 분석
+- pytest를 이용한 Middleware 동작 자동 검증
