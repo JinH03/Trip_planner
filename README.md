@@ -4151,3 +4151,83 @@ Day23까지 전체 테스트 목표는 99개이며, 정확한 통과 개수는 C
 - `time.perf_counter()`를 이용한 응답 시간 측정
 - Exception Logging을 통한 서버 장애 원인 분석
 - pytest를 이용한 Middleware 동작 자동 검증
+
+# TripCS Day24 — Health Check API
+
+## 1. 목표
+
+FastAPI 서버의 상태와 PostgreSQL·Redis 연결 상태를 확인하는 Health Check API를 구현한다.
+
+## 2. 구현 기능
+
+| API | 역할 | 정상 | 장애 |
+|---|---|---|---|
+| `GET /health/live` | 서버 자체 HTTP 응답 확인 (Liveness) | `200 OK` | 서버가 응답하지 않을 수 있음 |
+| `GET /health/ready` | PostgreSQL·Redis 연결 확인 (Readiness) | `200 OK` | `503 Service Unavailable` |
+
+두 API 모두 JWT 인증 없이 호출할 수 있다.
+
+## 3. 동작 방식
+
+- **Liveness:** 외부 의존성 검사 없이 `{"status": "ok"}` 반환
+- **Database:** SQLAlchemy `engine.connect()` 후 `SELECT 1` 실행
+- **Redis:** `get_redis_client().ping()` 실행
+- **Readiness:** DB와 Redis가 모두 `up`인 경우에만 HTTP 200 반환
+- **장애 시:** 문제 서비스는 `down`, 전체 상태는 `degraded`, HTTP 503 반환
+
+### 정상 응답 예시
+
+```json
+{
+  "status": "ok",
+  "services": {
+    "database": "up",
+    "redis": "up"
+  }
+}
+```
+
+### Redis 장애 응답 예시
+
+```json
+{
+  "status": "degraded",
+  "services": {
+    "database": "up",
+    "redis": "down"
+  }
+}
+```
+
+## 4. 주요 파일
+
+| 파일 | 역할 |
+|---|---|
+| `backend/routers/health.py` | Health Check 라우터 |
+| `backend/main.py` | Health Router 등록 |
+| `tests/test_health.py` | 상태 확인 및 장애 테스트 6개 |
+
+## 5. 테스트
+
+pytest와 `unittest.mock`으로 실제 DB나 Redis를 중단하지 않고 다음 상황을 검증했다.
+
+1. Liveness 정상 응답
+2. DB·Redis 모두 정상
+3. DB 연결 장애
+4. Redis 연결 장애
+5. DB·Redis 동시 장애
+6. 인증 없이 접근 가능
+
+```powershell
+python -m pytest tests/test_health.py -v
+python -m pytest -v
+```
+
+**결과:** 로컬 테스트 통과 및 GitHub Actions CI 성공. Day24까지 테스트 총 105개 기준.
+
+## 6. 배운 점과 주의사항
+
+- **Liveness**는 서버 프로세스의 응답 가능 여부, **Readiness**는 외부 의존성을 포함한 요청 처리 준비 상태를 확인한다.
+- `SELECT 1`, Redis `PING`으로 연결을 간단히 검사할 수 있다.
+- 상태 점검 응답에 비밀키·접속 주소 등 민감정보를 포함하지 않는다.
+- Day22의 장소 검색은 Redis 장애 시 Fail-open이지만, 현재 Readiness는 Redis 장애를 HTTP 503으로 처리한다. 운영 정책에 따라 Redis를 필수 의존성으로 볼지 결정해야 한다.
