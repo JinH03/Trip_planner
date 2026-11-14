@@ -4231,3 +4231,129 @@ python -m pytest -v
 - `SELECT 1`, Redis `PING`으로 연결을 간단히 검사할 수 있다.
 - 상태 점검 응답에 비밀키·접속 주소 등 민감정보를 포함하지 않는다.
 - Day22의 장소 검색은 Redis 장애 시 Fail-open이지만, 현재 Readiness는 Redis 장애를 HTTP 503으로 처리한다. 운영 정책에 따라 Redis를 필수 의존성으로 볼지 결정해야 한다.
+
+# TripCS Day25 — Docker Healthcheck & 장애 복구 검증
+
+## 1. 목표
+
+Docker Compose에서 FastAPI, PostgreSQL, Redis 컨테이너의 상태를 검사하고, 의존 서비스가 준비된 후 API 서버를 실행하도록 구성한다.
+
+## 2. 구현 기능
+
+- PostgreSQL: `pg_isready`로 상태 검사
+- Redis: `redis-cli ping`으로 상태 검사
+- FastAPI: `/health/ready` HTTP 요청으로 상태 검사
+- `depends_on: service_healthy`로 의존 서비스 준비 확인
+- `start_period`, `interval`, `timeout`, `retries` 설정
+- Redis 장애 및 복구 상황 직접 검증
+
+## 3. Docker Healthcheck 설정
+
+### FastAPI Healthcheck
+
+`compose.yaml`의 `api` 서비스에 추가했다.
+
+```yaml
+healthcheck:
+  test:
+    - CMD
+    - python
+    - -c
+    - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 20s
+```
+
+Python 표준 라이브러리 `urllib.request`를 사용하므로 별도의 `curl` 설치가 필요하지 않다.
+
+### 서비스 기동 순서
+
+```yaml
+depends_on:
+  db:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+```
+
+PostgreSQL과 Redis가 모두 `healthy` 상태가 된 후 FastAPI 컨테이너를 시작하도록 설정했다.
+
+## 4. 장애 테스트
+
+### Redis 중지
+
+```powershell
+docker compose stop redis
+docker compose ps -a
+```
+
+확인 결과:
+
+| 서비스 | 상태 |
+|---|---|
+| PostgreSQL | healthy |
+| Redis | Exited |
+| FastAPI | unhealthy |
+
+### Readiness 응답
+
+```powershell
+curl.exe -i http://127.0.0.1:8000/health/ready
+```
+
+HTTP 상태 코드: `503 Service Unavailable`
+
+```json
+{
+  "status": "degraded",
+  "services": {
+    "database": "up",
+    "redis": "down"
+  }
+}
+```
+
+### Redis 복구
+
+```powershell
+docker compose start redis
+docker compose ps
+```
+
+복구 후 PostgreSQL, Redis, FastAPI 모두 `healthy` 상태로 돌아오는 것을 확인했다.
+
+## 5. 주요 개념
+
+| 개념 | 설명 |
+|---|---|
+| `starting` | 초기 상태 검사 진행 중 |
+| `healthy` | Healthcheck 성공 |
+| `unhealthy` | 연속 상태 검사 실패 |
+| `start_period` | 초기화 중 검사 실패에 대한 유예 기간 |
+| `service_healthy` | 의존 서비스 준비 완료 후 시작 |
+| HTTP 503 | 서비스가 요청 처리 준비 상태가 아님 |
+
+## 6. 주의사항
+
+- Docker Healthcheck는 장애를 감지하지만 컨테이너를 자동으로 재시작하지는 않는다.
+- `depends_on: service_healthy`는 초기 기동 순서를 제어하며, 실행 중 장애를 자동으로 복구하지 않는다.
+- Redis 장애 시 장소 검색은 Day22의 Fail-open 정책에 따라 계속 허용될 수 있지만, Day24 Readiness는 503을 반환한다.
+- PostgreSQL과 Redis 데이터 볼륨을 보존하기 위해 `docker compose down -v`를 사용하지 않는다.
+
+## 7. 검증 결과
+
+- Docker Compose 설정 검증 성공
+- 컨테이너 3개 `healthy` 확인
+- Redis 장애 시 FastAPI `unhealthy` 확인
+- `/health/ready` HTTP 503 확인
+- Redis 복구 후 전체 `healthy` 복귀 확인
+
+GitHub Actions CI는 별도 실행 결과를 확인해야 한다.
+
+## 8. 배운 점
+
+Docker 컨테이너의 실행 상태와 서비스의 실제 준비 상태는 다르다.
+
+Healthcheck와 Readiness API를 연결하면 의존 서비스 장애를 감지할 수 있으며, Docker Compose에서 서비스 시작 순서를 안정적으로 관리할 수 있다.
