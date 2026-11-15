@@ -4357,3 +4357,90 @@ GitHub Actions CI는 별도 실행 결과를 확인해야 한다.
 Docker 컨테이너의 실행 상태와 서비스의 실제 준비 상태는 다르다.
 
 Healthcheck와 Readiness API를 연결하면 의존 서비스 장애를 감지할 수 있으며, Docker Compose에서 서비스 시작 순서를 안정적으로 관리할 수 있다.
+
+# TripCS Day26 — Docker Compose 통합 테스트 자동화
+
+## 1. 목표
+
+Day25에서 수동으로 확인한 Docker 컨테이너 상태와 Health Check API를 자동으로 검증한다. 로컬에서는 PowerShell Smoke Test를, GitHub Actions에서는 pytest와 Docker 통합 테스트를 별도 Job으로 실행한다.
+
+## 2. 구현 내용
+
+- 로컬 자동화: `scripts/smoke_test.ps1`
+- CI 자동화: `.github/workflows/test.yml`
+- Docker Compose 설정 검증 및 서비스 빌드·실행
+- PostgreSQL, Redis, FastAPI 컨테이너의 `healthy` 상태 확인
+- `/health/live`, `/health/ready` HTTP 응답 검사
+- CI 실패 시 컨테이너 로그 수집, 종료 시 컨테이너 정리
+
+## 3. 로컬 Smoke Test
+
+```powershell
+.\scripts\smoke_test.ps1
+```
+
+실행 순서:
+
+1. `docker compose config --quiet` — YAML 설정 검증
+2. `docker compose up -d --build` — 서비스 시작
+3. `docker inspect` — `db`, `redis`, `api`의 Healthcheck 확인
+4. `Invoke-RestMethod` — Health Check API 응답 확인
+
+검증 결과:
+
+```text
+db : healthy
+redis : healthy
+api : healthy
+TripCS Smoke Test PASSED!
+```
+
+## 4. GitHub Actions CI
+
+| Job | 검증 내용 |
+|---|---|
+| `test` | Python 3.12 + Redis 환경에서 기존 pytest 수행 |
+| `docker-smoke` | 실제 PostgreSQL·Redis·FastAPI 연동 및 HTTP 검사 |
+
+Docker Job에서는 CI 전용 `.env`를 만들고 다음 명령어로 서비스를 준비한다.
+
+```bash
+docker compose config --quiet
+docker compose up -d --build --wait --wait-timeout 180
+```
+
+`--wait`는 컨테이너가 준비될 때까지 대기하여 초기화 타이밍으로 인한 오류를 줄인다. 이후 서비스별 `healthy` 상태와 두 Health Check 엔드포인트의 응답을 확인한다.
+
+실패 시 진단 로그:
+
+```bash
+docker compose logs --tail=100
+```
+
+종료 시 정리:
+
+```bash
+docker compose down
+```
+
+> 데이터 볼륨을 삭제할 수 있는 `docker compose down -v`는 사용하지 않는다.
+
+## 5. 검증 결과
+
+- 로컬 PowerShell Smoke Test: **PASSED**
+- GitHub Actions: `test`, `Docker Compose Smoke Test` **두 Job 모두 성공**
+- 기존 pytest: Day24 기준 총 105개 테스트가 포함된 자동 검증 구성
+
+## 6. 배운 점
+
+- **Smoke Test:** 주요 기능이 최소한 정상 작동하는지 빠르게 확인
+- **Healthcheck:** 실행 중인 컨테이너의 실제 준비 상태 검사
+- **CI Job 분리:** pytest 실패와 Docker 통합 장애를 구분
+- **`docker compose up --wait`:** 서비스 초기화 완료까지 대기
+- **실패 로그 및 정리:** CI 장애 진단과 자원 관리 자동화
+
+## 7. 향후 개선
+
+- 실제 DB 마이그레이션 및 핵심 API 호출을 포함한 통합 테스트
+- CI·로컬·운영 환경변수의 안전한 분리
+- 장애 복구 시나리오 자동화
