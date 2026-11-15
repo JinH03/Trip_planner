@@ -52,3 +52,73 @@ jobs:
 
       - name: Run pytest
         run: python -m pytest -v
+
+  docker-smoke:
+    name: Docker Compose Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Create CI environment file
+        run: |
+          {
+            echo "DOCKER_DB_PASSWORD=tripcs-ci-only-db-password"
+            echo "JWT_SECRET_KEY=tripcs-ci-only-test-secret-key"
+            echo "GOOGLE_PLACES_API_KEY=ci-mock-api-key"
+          } > .env
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build and start containers
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Check container health
+        run: |
+          docker compose ps
+
+          for service in db redis api; do
+            container_id=$(docker compose ps -q "$service")
+            health=$(docker inspect --format '{{.State.Health.Status}}' "$container_id")
+
+            echo "$service : $health"
+
+            if [ "$health" != "healthy" ]; then
+              exit 1
+            fi
+          done
+
+      - name: Check API endpoints
+        run: |
+          python3 - <<'PY'
+          import json
+          from urllib.request import urlopen
+
+          base_url = "http://127.0.0.1:8000"
+
+          with urlopen(f"{base_url}/health/live", timeout=5) as response:
+              assert response.status == 200
+              live = json.load(response)
+
+          assert live["status"] == "ok"
+
+          with urlopen(f"{base_url}/health/ready", timeout=5) as response:
+              assert response.status == 200
+              ready = json.load(response)
+
+          assert ready["status"] == "ok"
+          assert ready["services"]["database"] == "up"
+          assert ready["services"]["redis"] == "up"
+
+          print("TripCS Docker Smoke Test PASSED!")
+          PY
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+
+      - name: Stop containers
+        if: always()
+        run: docker compose down
