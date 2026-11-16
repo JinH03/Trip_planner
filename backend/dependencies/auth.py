@@ -1,3 +1,4 @@
+
 import os
 
 from dotenv import load_dotenv
@@ -6,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
+from backend.config import ConfigError, require_env
 from backend.database import get_db
 from backend.models import User
 
@@ -21,18 +23,24 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ):
-    if not JWT_SECRET_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="JWT_SECRET_KEY is not configured",
-        )
+    secret_key = JWT_SECRET_KEY
+
+    # 서버 설정 문제는 500 오류로 처리
+    if not secret_key or not secret_key.strip():
+        try:
+            secret_key = require_env("JWT_SECRET_KEY")
+        except ConfigError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="JWT authentication is not configured",
+            ) from exc
 
     token = credentials.credentials
 
     try:
         payload = jwt.decode(
             token,
-            JWT_SECRET_KEY,
+            secret_key,
             algorithms=[JWT_ALGORITHM],
         )
 
