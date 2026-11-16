@@ -4444,3 +4444,187 @@ docker compose down
 - 실제 DB 마이그레이션 및 핵심 API 호출을 포함한 통합 테스트
 - CI·로컬·운영 환경변수의 안전한 분리
 - 장애 복구 시나리오 자동화
+
+
+# TripCS Day27 — 환경변수 관리 및 보안 강화
+
+## 1. 목표
+
+로컬, Docker, GitHub Actions 환경에서 사용하는 설정을
+안전하게 관리하고, 필수 환경변수가 누락됐을 때
+명확한 오류가 발생하도록 개선한다.
+
+## 2. 구현 내용
+
+- `.gitignore` 환경변수 파일 제외 규칙 강화
+- `.env.example` 템플릿 생성
+- `backend/config.py` 환경변수 검증 함수 구현
+- JWT 인증 및 토큰 생성에 공통 검증 함수 연결
+- 데이터베이스 설정에 공통 검증 함수 연결
+- pytest 환경변수 검증 테스트 11개 작성
+
+## 3. 환경변수 파일 보안
+
+`.gitignore`에 다음 규칙을 추가했다.
+
+```gitignore
+.env
+.env.*
+!.env.example
+```
+
+실제 비밀정보를 포함하는 `.env`, `.env.production` 등은
+Git에서 제외하고, 설정 항목만 포함하는 `.env.example`은
+Git에 추가할 수 있도록 구성했다.
+
+```powershell
+git ls-files -- .env .env.local .env.production
+git check-ignore -v .env
+```
+
+현재 `.env`가 Git에서 추적되지 않는 것을 확인했다.
+
+## 4. 환경변수 템플릿
+
+`.env.example`에 다음 설정 항목을 문서화했다.
+
+- DATABASE_URL
+- DOCKER_DB_PASSWORD
+- REDIS_URL
+- JWT_SECRET_KEY
+- JWT_ALGORITHM
+- JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+- GOOGLE_PLACES_API_KEY
+- SMTP_HOST / SMTP_PORT
+- SMTP_USER / SMTP_PASSWORD / SMTP_FROM
+- GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+- GOOGLE_REDIRECT_URI
+- KAKAO_REST_API_KEY / KAKAO_CLIENT_SECRET
+- KAKAO_REDIRECT_URI
+
+실제 비밀번호와 API 키 대신 예시 값을 사용했다.
+
+## 5. 공통 환경변수 검증
+
+새 파일: `backend/config.py`
+
+```python
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+
+    if not value or not value.strip():
+        raise ConfigError(
+            f"Missing required environment variable: {name}"
+        )
+
+    return value
+```
+
+핵심 기능:
+
+1. 환경변수 누락 검사
+2. 빈 문자열 검사
+3. 공백 문자열 검사
+4. 실제 비밀정보를 오류 메시지에 포함하지 않음
+
+`validate_environment()`는 DATABASE_URL과
+JWT_SECRET_KEY를 필수 설정으로 검사한다.
+
+## 6. 기존 코드와 연결
+
+### JWT 토큰 생성
+
+파일: `backend/services/auth.py`
+
+JWT_SECRET_KEY가 누락된 경우 공통 검증 함수를 사용해
+명확한 설정 오류를 발생시키도록 변경했다.
+
+### JWT 인증
+
+파일: `backend/dependencies/auth.py`
+
+- JWT 설정 누락: HTTP 500
+- 유효하지 않은 JWT: HTTP 401
+- 만료된 JWT: HTTP 401
+- 존재하지 않는 사용자: HTTP 401
+
+서버 설정 문제와 사용자 인증 실패를 구분했다.
+
+### 데이터베이스
+
+파일: `backend/database.py`
+
+변경 전:
+
+```python
+DATABASE_URL = os.getenv("DATABASE_URL")
+```
+
+변경 후:
+
+```python
+DATABASE_URL = require_env("DATABASE_URL")
+```
+
+필수 설정이 없으면 SQLAlchemy 엔진 생성 이전에
+ConfigError가 발생하도록 개선했다.
+
+## 7. 테스트
+
+파일: `tests/test_config.py`
+
+검증 내용:
+
+- 환경변수 정상 조회
+- 환경변수 누락
+- 빈 문자열
+- 공백 문자열
+- 필수 환경변수 검증 성공
+- JWT 환경변수 누락
+- 오류 메시지의 비밀정보 노출 방지
+- JWT 비밀키 누락 시 토큰 생성 실패
+- 정상 JWT 토큰 생성 및 검증
+- DATABASE_URL 정상 조회
+- DATABASE_URL 누락
+
+실행 명령:
+
+```powershell
+python -m pytest tests/test_config.py -v
+python -m pytest -v
+```
+
+로컬 테스트 결과:
+
+- 환경변수 테스트: 11개 통과
+- 전체 테스트: 116개 통과
+
+## 8. 배운 점
+
+### Fail Fast
+
+필수 설정이 없으면 애플리케이션이 잘못된 상태로
+동작하기 전에 명확한 오류를 발생시킨다.
+
+### Secrets Management
+
+실제 비밀번호와 API 키는 Git에 저장하지 않는다.
+환경별로 서로 다른 비밀정보를 사용한다.
+
+### Configuration Validation
+
+환경변수 검증 로직을 공통 함수로 분리해 중복을 줄인다.
+
+### Test Isolation
+
+pytest의 monkeypatch를 사용해 실제 `.env` 파일을
+변경하지 않고 다양한 환경변수 조건을 테스트한다.
+
+## 9. 향후 개선
+
+- JWT 설정을 단일 설정 객체로 중앙화
+- JWT 비밀키 강도 및 허용 알고리즘 검증
+- SMTP, OAuth 설정 검증 확대
+- 운영 환경에서 Secrets Manager 적용
+- Git 기록에 포함된 비밀정보 추가 점검
+- GitHub Actions 최종 성공 여부 확인
