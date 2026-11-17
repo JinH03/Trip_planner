@@ -81,14 +81,69 @@ jobs:
 
           for service in db redis api; do
             container_id=$(docker compose ps -q "$service")
-            health=$(docker inspect --format '{{.State.Health.Status}}' "$container_id")
+
+            if [ -z "$container_id" ]; then
+              echo "$service container not found"
+              exit 1
+            fi
+
+            health=$(docker inspect \
+              --format '{{.State.Health.Status}}' \
+              "$container_id")
 
             echo "$service : $health"
 
             if [ "$health" != "healthy" ]; then
+              echo "$service is not healthy"
               exit 1
             fi
           done
+
+      - name: Check Alembic migration
+        run: |
+          container_id=$(docker compose ps -a -q migrate)
+
+          if [ -z "$container_id" ]; then
+            echo "Migration container not found"
+            exit 1
+          fi
+
+          status=$(docker inspect \
+            --format '{{.State.Status}}' \
+            "$container_id")
+
+          exit_code=$(docker inspect \
+            --format '{{.State.ExitCode}}' \
+            "$container_id")
+
+          echo "migrate : $status (exit $exit_code)"
+
+          if [ "$status" != "exited" ] || [ "$exit_code" != "0" ]; then
+            echo "Alembic migration failed"
+            exit 1
+          fi
+
+          echo "Alembic migration completed successfully"
+
+      - name: Verify database revision
+        run: |
+          current=$(docker compose run --rm --no-deps migrate alembic current -q)
+          head=$(docker compose run --rm --no-deps migrate alembic heads -q)
+
+          echo "Current revision: $current"
+          echo "Head revision: $head"
+
+          if [ -z "$current" ] || [ -z "$head" ]; then
+            echo "Alembic revision could not be determined"
+            exit 1
+          fi
+
+          if [ "$current" != "$head" ]; then
+            echo "Database is not at the latest revision"
+            exit 1
+          fi
+
+          echo "Database revision is up to date"
 
       - name: Check API endpoints
         run: |

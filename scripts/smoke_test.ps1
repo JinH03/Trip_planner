@@ -68,6 +68,40 @@ if (-not $allHealthy) {
     throw "Some Docker services are not healthy"
 }
 
+# Check migration container exit code
+Write-Host "Checking Alembic migration result..."
+
+$migrateContainerId = [string](
+    docker compose ps -a -q migrate
+)
+
+$migrateContainerId = $migrateContainerId.Trim()
+
+if (-not $migrateContainerId) {
+    throw "Migration container not found"
+}
+
+$migrateStatus = (
+    docker inspect `
+        --format '{{.State.Status}}' `
+        $migrateContainerId
+).Trim()
+
+$migrateExitCode = (
+    docker inspect `
+        --format '{{.State.ExitCode}}' `
+        $migrateContainerId
+).Trim()
+
+Write-Host "migrate : $migrateStatus (exit $migrateExitCode)"
+
+if (
+    $migrateStatus -ne "exited" -or
+    $migrateExitCode -ne "0"
+) {
+    throw "Alembic migration failed"
+}
+
 # 4. HTTP Health Check
 Write-Host "[4/4] Checking API endpoints..."
 

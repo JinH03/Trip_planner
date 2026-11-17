@@ -29,6 +29,20 @@ services:
       retries: 10
       start_period: 10s
 
+  migrate:
+    build: .
+    image: tripcs-api:day20
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:${DOCKER_DB_PASSWORD}@db:5432/trip_planner
+      REDIS_URL: redis://redis:6379/0
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build: .
     image: tripcs-api:day20
@@ -44,6 +58,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
