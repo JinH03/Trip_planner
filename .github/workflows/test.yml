@@ -127,8 +127,8 @@ jobs:
 
       - name: Verify database revision
         run: |
-          current=$(docker compose run --rm --no-deps migrate alembic current -q)
-          head=$(docker compose run --rm --no-deps migrate alembic heads -q)
+          current=$(docker compose run --rm --no-deps migrate alembic -q current)
+          head=$(docker compose run --rm --no-deps migrate alembic -q heads)
 
           echo "Current revision: $current"
           echo "Head revision: $head"

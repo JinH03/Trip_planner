@@ -4628,3 +4628,255 @@ pytest의 monkeypatch를 사용해 실제 `.env` 파일을
 - 운영 환경에서 Secrets Manager 적용
 - Git 기록에 포함된 비밀정보 추가 점검
 - GitHub Actions 최종 성공 여부 확인
+
+# TripCS Day28 — Alembic 데이터베이스 마이그레이션 자동화
+
+## 1. 목표
+
+Docker Compose로 애플리케이션을 실행할 때 Alembic 마이그레이션을 자동 적용하고, 마이그레이션이 성공한 경우에만 FastAPI가 시작되도록 구성한다.
+
+또한 로컬 Smoke Test와 GitHub Actions에서 마이그레이션 상태를 검증하여 배포 안정성을 높인다.
+
+## 2. 기존 문제
+
+Day27까지는 Docker Compose에서 다음 서비스만 실행했다.
+
+- PostgreSQL (`db`)
+- Redis (`redis`)
+- FastAPI (`api`)
+
+하지만 PostgreSQL 컨테이너가 `healthy`여도 실제 애플리케이션에 필요한 테이블과 스키마가 최신이라는 보장은 없다.
+
+기존에는 Alembic 마이그레이션을 별도로 실행해야 했다.
+
+**개선 목표:** DB 준비 → 마이그레이션 성공 → API 시작 순서를 자동으로 보장한다.
+
+## 3. Alembic Revision 확인
+
+로컬 PostgreSQL과 Docker PostgreSQL의 마이그레이션 상태를 확인했다.
+
+```powershell
+alembic current
+alembic heads
+```
+
+Docker 환경에서는 다음 명령을 사용했다.
+
+```powershell
+docker compose run --rm --no-deps migrate alembic current
+```
+
+확인 결과:
+
+| 환경 | 현재 Revision | 최신 Head |
+|---|---|---|
+| 로컬 PostgreSQL | `d0bc3e999a80` | `d0bc3e999a80` |
+| Docker PostgreSQL | `d0bc3e999a80` | `d0bc3e999a80` |
+
+두 환경 모두 Alembic 기준 최신 Revision이었다.
+
+## 4. Docker Compose에 Migration 서비스 추가
+
+수정 파일: `compose.yaml`
+
+```yaml
+migrate:
+  build: .
+  image: tripcs-api:day20
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: postgresql+psycopg2://postgres:${DOCKER_DB_PASSWORD}@db:5432/trip_planner
+    REDIS_URL: redis://redis:6379/0
+  command: ["alembic", "upgrade", "head"]
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: "no"
+```
+
+`migrate` 컨테이너는 PostgreSQL이 준비된 후 `alembic upgrade head`를 실행한다.
+
+마이그레이션이 성공하면 종료 코드 `0`으로 종료된다.
+
+## 5. API 시작 조건 변경
+
+`api` 서비스에 다음 의존성을 추가했다.
+
+```yaml
+depends_on:
+  db:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+```
+
+이제 FastAPI는 다음 조건이 충족되어야 시작한다.
+
+1. PostgreSQL Healthcheck 성공
+2. Redis Healthcheck 성공
+3. Alembic Migration 정상 종료
+
+마이그레이션에 실패하면 API 시작을 방지할 수 있다.
+
+## 6. Docker 실행 및 검증
+
+```powershell
+docker compose config --quiet
+docker compose up -d --build --wait --wait-timeout 180
+docker compose ps -a
+docker compose logs migrate --tail=30
+```
+
+기대 상태:
+
+| 서비스 | 정상 상태 |
+|---|---|
+| `db` | healthy |
+| `redis` | healthy |
+| `migrate` | Exited (0) |
+| `api` | healthy |
+
+`migrate`는 일회성 작업 컨테이너이므로 `Exited (0)`이 정상이다.
+
+## 7. PowerShell Smoke Test 개선
+
+수정 파일: `scripts/smoke_test.ps1`
+
+기존에는 DB, Redis, API 컨테이너의 Healthcheck와 HTTP API 응답만 확인했다.
+
+Day28에서는 Migration 컨테이너의 실행 결과도 확인하도록 확장했다.
+
+```powershell
+$migrateContainerId = [string](
+    docker compose ps -a -q migrate
+)
+
+$migrateContainerId = $migrateContainerId.Trim()
+
+if (-not $migrateContainerId) {
+    throw "Migration container not found"
+}
+
+$migrateStatus = (
+    docker inspect `
+        --format '{{.State.Status}}' `
+        $migrateContainerId
+).Trim()
+
+$migrateExitCode = (
+    docker inspect `
+        --format '{{.State.ExitCode}}' `
+        $migrateContainerId
+).Trim()
+
+if (
+    $migrateStatus -ne "exited" -or
+    $migrateExitCode -ne "0"
+) {
+    throw "Alembic migration failed"
+}
+```
+
+실행:
+
+```powershell
+.\scripts\smoke_test.ps1
+```
+
+로컬 테스트 결과:
+
+```text
+db : healthy
+redis : healthy
+api : healthy
+
+migrate : exited (exit 0)
+
+TripCS Smoke Test PASSED!
+```
+
+## 8. GitHub Actions CI 확장
+
+수정 파일: `.github/workflows/test.yml`
+
+기존의 `test`, `docker-smoke` Job 구조를 유지하면서 다음 두 검증을 추가했다.
+
+### Migration 컨테이너 종료 상태 검사
+
+```bash
+container_id=$(docker compose ps -a -q migrate)
+
+status=$(docker inspect \
+  --format '{{.State.Status}}' \
+  "$container_id")
+
+exit_code=$(docker inspect \
+  --format '{{.State.ExitCode}}' \
+  "$container_id")
+
+if [ "$status" != "exited" ] || [ "$exit_code" != "0" ]; then
+  exit 1
+fi
+```
+
+### Alembic Revision 일치 여부 검사
+
+```bash
+current=$(docker compose run --rm --no-deps migrate alembic current -q)
+head=$(docker compose run --rm --no-deps migrate alembic heads -q)
+
+if [ -z "$current" ] || [ -z "$head" ] || [ "$current" != "$head" ]; then
+  exit 1
+fi
+```
+
+CI 환경에서 마이그레이션 성공 여부와 DB Revision 상태를 모두 검증하도록 구성했다.
+
+**검증 상태:** GitHub Actions 설정은 작성했으며 최종 실행 결과 확인이 필요하다.
+
+## 9. 핵심 개념
+
+### Database Migration
+
+데이터베이스 테이블 및 컬럼 변경 이력을 버전으로 관리하는 방법이다.
+
+### `alembic upgrade head`
+
+현재 데이터베이스에 아직 적용되지 않은 마이그레이션을 최신 Revision까지 적용한다.
+
+### `service_completed_successfully`
+
+의존 서비스가 종료 코드 `0`으로 성공적으로 완료되어야 다음 서비스를 시작하도록 하는 Docker Compose 조건이다.
+
+### `Exited (0)`
+
+작업 컨테이너가 정상적으로 실행을 완료했다는 의미다. 서버 컨테이너의 `healthy`와는 다르다.
+
+### Current vs Head
+
+- Current: DB에 적용된 Revision
+- Head: 코드에 정의된 최신 Revision
+
+두 값이 일치하면 해당 Revision 기준으로 최신 상태다.
+
+## 10. 테스트 결과
+
+- 로컬 Alembic Revision 확인: 성공
+- Docker Alembic Revision 확인: 성공
+- Docker Compose 자동 Migration: 성공
+- Migration 완료 후 FastAPI 실행: 성공
+- PowerShell Smoke Test: 통과
+- GitHub Actions 최종 검증: 확인 필요
+
+기존 pytest 테스트는 116개이며, Day28에서 새로운 pytest 테스트를 추가하지는 않았다.
+
+## 11. 향후 개선
+
+- 마이그레이션이 실패하는 상황을 자동 테스트
+- 신규 PostgreSQL 볼륨에서 초기 Migration 검증
+- 여러 Alembic Head가 존재하는 경우 대응
+- 실제 DB 테이블 및 스키마 일치 여부 검사 강화
+- 배포 전 데이터베이스 백업 및 복구 절차 마련
