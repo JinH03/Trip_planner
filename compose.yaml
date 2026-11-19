@@ -42,6 +42,10 @@ services:
       db:
         condition: service_healthy
     restart: "no"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
   api:
     build: .
@@ -60,6 +64,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test:
         - CMD

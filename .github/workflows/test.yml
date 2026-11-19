@@ -177,3 +177,37 @@ jobs:
       - name: Stop containers
         if: always()
         run: docker compose down
+
+      - name: Verify container security
+        run: |
+          echo "Checking API container security..."
+
+          docker compose exec -T api sh -c '
+            echo "User:"
+            id
+
+            echo "Security status:"
+            grep CapEff /proc/1/status
+            grep NoNewPrivs /proc/1/status
+
+            test "$(id -u)" -ne 0 || exit 1
+            grep -q "CapEff:[[:space:]]*0000000000000000" /proc/1/status || exit 1
+            grep -q "NoNewPrivs:[[:space:]]*1" /proc/1/status || exit 1
+          '
+
+          echo "Checking Migration container security..."
+
+          docker compose run --rm --no-deps -T migrate sh -c '
+            echo "User:"
+            id
+
+            echo "Security status:"
+            grep CapEff /proc/1/status
+            grep NoNewPrivs /proc/1/status
+
+            test "$(id -u)" -ne 0 || exit 1
+            grep -q "CapEff:[[:space:]]*0000000000000000" /proc/1/status || exit 1
+            grep -q "NoNewPrivs:[[:space:]]*1" /proc/1/status || exit 1
+          '
+
+          echo "Container security checks PASSED!"

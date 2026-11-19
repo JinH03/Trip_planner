@@ -1,13 +1,35 @@
+
+# Python virtual environments
 venv/
 .venv/
 venv_old/
+
+# Python cache
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Git
 .git/
+
+# Environment secrets
 .env
+.env.*
+
+# Local databases and backups
+*.db
+*.sqlite
+*.sqlite3
 *.dump
 *.log
-.requirements.txt
-.tripcs_backup.dump
-.질문.txt
+*.bak
+
+# Temporary files
+*.tmp
+
+# Local documentation and backups
+*.md
+
+# IDE settings
+.vscode/
+.idea/
