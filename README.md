@@ -4880,3 +4880,215 @@ CI 환경에서 마이그레이션 성공 여부와 DB Revision 상태를 모두
 - 여러 Alembic Head가 존재하는 경우 대응
 - 실제 DB 테이블 및 스키마 일치 여부 검사 강화
 - 배포 전 데이터베이스 백업 및 복구 절차 마련
+
+
+# TripCS Day29 — Docker 컨테이너 보안 강화
+
+## 1. 목표
+
+FastAPI와 Alembic Migration 컨테이너의 불필요한 실행 권한을 제거하고, Docker 보안 설정을 자동으로 검증한다.
+
+기존 PostgreSQL, Redis, FastAPI, Alembic 기능은 그대로 유지하면서 컨테이너 보안을 강화한다.
+
+## 2. 기존 문제
+
+기존 Dockerfile에는 실행 사용자를 지정하는 `USER` 명령이 없었다.
+
+실제 확인 결과:
+
+```text
+uid=0(root) gid=0(root) groups=0(root)
+```
+
+FastAPI와 Alembic이 모두 root 사용자로 실행되고 있었다.
+
+또한 컨테이너에 필요한 권한만 제한하는 설정이 없어 공격 발생 시 불필요한 권한으로 동작할 위험이 있었다.
+
+## 3. Dockerfile 비-root 사용자 적용
+
+수정 파일: `Dockerfile`
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN groupadd --system appgroup \
+    && useradd --system \
+        --gid appgroup \
+        --create-home \
+        appuser
+
+COPY --chown=appuser:appgroup backend/ ./backend/
+COPY --chown=appuser:appgroup alembic/ ./alembic/
+COPY --chown=appuser:appgroup alembic.ini .
+
+USER appuser
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+주요 변경 사항:
+
+- `appgroup`, `appuser` 생성
+- `COPY --chown`으로 애플리케이션 파일 소유권 지정
+- `USER appuser`로 비-root 실행
+- `.pyc` 생성 방지 및 Python 로그 버퍼링 비활성화
+
+## 4. Docker 빌드 컨텍스트 보안
+
+수정 파일: `.dockerignore`
+
+주요 제외 대상:
+
+- Python 가상환경: `venv/`, `.venv/`
+- 캐시: `__pycache__/`, `*.pyc`
+- Git 내부 정보: `.git/`
+- 환경변수: `.env`, `.env.*`
+- 로컬 DB, 백업 및 로그 파일
+
+`.dockerignore`는 Docker 이미지 빌드 시 불필요하거나 민감한 파일이 빌드 컨텍스트에 포함되지 않도록 한다.
+
+`.gitignore`와 `.dockerignore`는 역할이 다르며 별도로 관리해야 한다.
+
+## 5. Docker Compose 권한 최소화
+
+수정 파일: `compose.yaml`
+
+FastAPI와 Alembic 서비스에 다음 설정을 적용했다.
+
+```yaml
+cap_drop:
+  - ALL
+security_opt:
+  - no-new-privileges:true
+```
+
+### cap_drop: ALL
+
+컨테이너에 기본으로 부여되는 Linux Capability를 모두 제거한다.
+
+### no-new-privileges
+
+프로세스가 실행 중 `exec` 등의 동작으로 추가 권한을 얻지 못하도록 제한한다.
+
+PostgreSQL과 Redis는 초기화 및 데이터 볼륨 권한에 영향을 줄 수 있으므로 이번 단계에서는 변경하지 않았다.
+
+## 6. 보안 설정 검증
+
+### 실행 사용자 확인
+
+```powershell
+docker compose exec api id
+
+docker compose run --rm --no-deps migrate id
+```
+
+두 서비스가 비-root 사용자 `appuser`로 실행되는지 확인한다.
+
+### Linux Capability 확인
+
+```powershell
+docker compose exec api sh -c 'grep CapEff /proc/1/status'
+```
+
+정상 결과:
+
+```text
+CapEff: 0000000000000000
+```
+
+유효 Linux Capability가 없음을 의미한다.
+
+### NoNewPrivs 확인
+
+```powershell
+docker compose exec api sh -c 'grep NoNewPrivs /proc/1/status'
+```
+
+정상 결과:
+
+```text
+NoNewPrivs: 1
+```
+
+추가 권한 획득 방지 설정이 활성화되었음을 의미한다.
+
+### Migration 컨테이너 검사
+
+```powershell
+docker compose run --rm --no-deps migrate sh -c 'grep CapEff /proc/1/status; grep NoNewPrivs /proc/1/status'
+```
+
+Windows PowerShell에서 중첩 따옴표와 파이프 문자 처리 문제를 피하기 위해 `grep` 명령을 분리했다.
+
+## 7. GitHub Actions 보안 검사
+
+수정 파일: `.github/workflows/test.yml`
+
+기존 `docker-smoke` Job에 `Verify container security` 단계를 추가했다.
+
+검사 내용:
+
+1. API 컨테이너가 비-root UID로 실행되는지 확인
+2. `CapEff`가 0인지 확인
+3. `NoNewPrivs`가 1인지 확인
+4. Alembic Migration 컨테이너에도 같은 조건 적용
+
+조건을 만족하지 않으면 명령이 종료 코드 1을 반환해 CI Job이 실패하도록 구성했다.
+
+또한 보안 검사는 컨테이너가 실행 중일 때 수행하고, `Stop containers` 단계는 맨 마지막에 실행하도록 순서를 수정했다.
+
+**GitHub Actions 최종 통과 여부는 추가 확인이 필요하다.**
+
+## 8. 테스트 결과
+
+| 테스트 | 결과 |
+|---|---|
+| FastAPI 비-root 실행 | 통과 |
+| Alembic 비-root 실행 | 통과 |
+| CapEff 검사 | 통과 |
+| NoNewPrivs 검사 | 통과 |
+| Docker Compose Smoke Test | 통과 |
+| 전체 pytest 116개 | 통과 |
+| GitHub Actions 최종 실행 | 확인 필요 |
+
+## 9. 배운 점
+
+### Least Privilege (최소 권한 원칙)
+
+서비스는 정상 동작에 필요한 최소한의 권한으로 실행해야 한다.
+
+### Non-root Container
+
+애플리케이션을 root가 아닌 전용 사용자로 실행해 불필요한 권한을 줄인다.
+
+### Linux Capabilities
+
+root 권한을 더 작은 단위로 나누어 관리하는 Linux 보안 기능이다.
+
+### No New Privileges
+
+프로세스가 실행 중 추가 권한을 획득하지 못하도록 제한하는 보안 설정이다.
+
+### CI Security Validation
+
+보안 설정을 문서로만 관리하지 않고, GitHub Actions에서 실제 컨테이너 상태를 자동 검사한다.
+
+## 10. 향후 개선
+
+- Docker 이미지 취약점 스캔
+- 이미지 버전 및 Digest 고정
+- 읽기 전용 루트 파일시스템 적용 검토
+- 컨테이너 리소스 제한
+- 운영 환경의 비밀정보 관리 강화
+- 배포 환경별 보안 정책 분리
