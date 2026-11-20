@@ -1,10 +1,11 @@
 
 import os
 
+import jwt
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jwt.exceptions import InvalidTokenError
 from sqlalchemy.orm import Session
 
 from backend.config import ConfigError, require_env
@@ -25,7 +26,6 @@ def get_current_user(
 ):
     secret_key = JWT_SECRET_KEY
 
-    # 서버 설정 문제는 500 오류로 처리
     if not secret_key or not secret_key.strip():
         try:
             secret_key = require_env("JWT_SECRET_KEY")
@@ -54,7 +54,7 @@ def get_current_user(
 
         user_id = int(user_id)
 
-    except (JWTError, ValueError):
+    except (InvalidTokenError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

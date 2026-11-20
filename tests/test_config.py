@@ -97,7 +97,7 @@ def test_create_access_token_missing_secret(monkeypatch):
 
 
 def test_create_access_token_with_secret(monkeypatch):
-    from jose import jwt
+    import jwt
     from backend.services import auth as auth_service
 
     secret = "day27-test-only-secret"
@@ -142,3 +142,48 @@ def test_database_url_missing(monkeypatch):
         match="DATABASE_URL",
     ):
         require_env("DATABASE_URL")
+
+def test_pyjwt_rejects_expired_token():
+    import jwt
+    from datetime import datetime, timedelta, timezone
+
+    secret = "day30-test-secret"
+
+    expired = datetime.now(timezone.utc) - timedelta(
+        minutes=1
+    )
+
+    token = jwt.encode(
+        {
+            "sub": "1",
+            "exp": expired,
+        },
+        secret,
+        algorithm="HS256",
+    )
+
+    with pytest.raises(jwt.ExpiredSignatureError):
+        jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+        )
+
+
+def test_pyjwt_rejects_wrong_algorithm():
+    import jwt
+
+    secret = "day30-test-secret"
+
+    token = jwt.encode(
+        {"sub": "1"},
+        secret,
+        algorithm="HS384",
+    )
+
+    with pytest.raises(jwt.InvalidAlgorithmError):
+        jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+        )

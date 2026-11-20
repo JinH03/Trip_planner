@@ -2,8 +2,8 @@
 import os
 from datetime import datetime, timedelta, timezone
 
+import jwt
 from dotenv import load_dotenv
-from jose import jwt
 from sqlalchemy.orm import Session
 
 from backend.config import require_env
@@ -46,10 +46,8 @@ def authenticate_user(
 
 
 def create_access_token(user_id: int) -> str:
-    # 기존 모듈 변수와 테스트 호환성 유지
     secret_key = JWT_SECRET_KEY
 
-    # 비밀키가 없거나 공백이면 공통 검증 함수 사용
     if not secret_key or not secret_key.strip():
         secret_key = require_env("JWT_SECRET_KEY")
 
