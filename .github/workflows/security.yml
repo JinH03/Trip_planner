@@ -20,14 +20,33 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build TripCS Docker image
-        run: docker build -t tripcs-api:day30 .
+        run: docker build --pull -t tripcs-api:day30 .
 
-      - name: Scan Docker image with Trivy
+      # 1. 전체 취약점 보고서
+      # 수정 불가능한 취약점도 확인한다.
+      - name: Trivy Full Vulnerability Report
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: tripcs-api:day30
+          scanners: vuln
           format: table
           severity: HIGH,CRITICAL
           vuln-type: os,library
+          ignore-unfixed: false
           exit-code: '0'
+
+      # 2. CI 보안 차단 검사
+      # 수정 가능한 HIGH/CRITICAL 취약점이 있으면 실패한다.
+      - name: Trivy Security Gate
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: tripcs-api:day30
+          scanners: vuln
+          format: table
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: '1'
+          skip-setup-trivy: true
