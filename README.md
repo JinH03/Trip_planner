@@ -5092,3 +5092,679 @@ root 권한을 더 작은 단위로 나누어 관리하는 Linux 보안 기능�
 - 컨테이너 리소스 제한
 - 운영 환경의 비밀정보 관리 강화
 - 배포 환경별 보안 정책 분리
+
+# Day30 — Docker 이미지 취약점 스캔 및 CI 보안 자동화
+
+## 1. 학습 목표
+
+Docker 이미지에 포함된 OS 패키지와 Python 라이브러리의 알려진 취약점을 검사하고, 발견된 취약점을 개선한다.
+
+Trivy를 GitHub Actions에 통합해 수정 가능한 HIGH / CRITICAL 취약점이 발견되면 CI가 자동으로 실패하도록 구성한다.
+
+### 핵심 기술
+
+- Docker / Dockerfile
+- Trivy
+- GitHub Actions
+- Python 패키지 의존성 관리
+- JWT 인증 라이브러리 마이그레이션
+- Debian OS 보안 패치
+
+---
+
+## 2. 문제 상황
+
+기존 TripCS는 다음과 같은 보안 조치를 적용하고 있었다.
+
+- 비-root 사용자로 컨테이너 실행
+- Linux Capability 제거
+- `no-new-privileges` 설정
+- Docker Compose 헬스체크
+- Alembic 마이그레이션 자동화
+- Docker Smoke Test 및 CI 검증
+
+하지만 컨테이너의 실행 권한을 제한하더라도 이미지 내부에 취약한 패키지가 존재할 수 있다.
+
+이를 해결하기 위해 Trivy를 도입했다.
+
+## 3. 최초 취약점 스캔 결과
+
+`tripcs-api:day30` 이미지에 대한 최초 HIGH / CRITICAL 스캔 결과:
+
+| 분류 | HIGH | CRITICAL | 합계 |
+|---|---:|---:|---:|
+| Debian OS | 48 | 0 | 48 |
+| Python 패키지 | 7 | 2 | 9 |
+| **전체** | **55** | **2** | **57** |
+
+대표 취약점:
+
+| 패키지 | 취약점 | 대응 |
+|---|---|---|
+| certifi | CRITICAL | 수정 버전 업데이트 |
+| dnspython | HIGH | 수정 버전 업데이트 |
+| pyasn1 | HIGH | 수정 버전 업데이트 후 의존성 정리 |
+| python-jose | CRITICAL | PyJWT로 교체 |
+| ecdsa | HIGH | 불필요한 의존성 제거 |
+| zlib1g | HIGH | Debian 보안 패치 |
+
+*취약점 건수는 해당 시점의 Trivy 탐지 결과이며, 동일 CVE가 여러 패키지에 보고될 수 있다.*
+
+---
+
+## 4. Python 의존성 취약점 해결
+
+### 4.1 수정 버전 적용
+
+`requirements.txt`에서 취약한 라이브러리를 업데이트했다.
+
+```text
+certifi==2026.10.18
+dnspython==2.9.2
+```
+
+패키지 설치 후 다음 명령으로 의존성 충돌을 확인했다.
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+### 4.2 python-jose에서 PyJWT로 전환
+
+기존 JWT 구현은 `python-jose`에 의존하고 있었다.
+
+```python
+from jose import jwt
+```
+
+Trivy에서 `python-jose`와 해당 의존성인 `ecdsa`의 취약점이 발견되었다.
+
+이에 따라 JWT 인증 라이브러리를 PyJWT로 변경했다.
+
+```python
+import jwt
+from jwt.exceptions import InvalidTokenError
+```
+
+`requirements.txt`에서는 다음 패키지를 제거했다.
+
+```text
+python-jose
+ecdsa
+rsa
+pyasn1
+```
+
+그리고 다음 패키지를 추가했다.
+
+```text
+PyJWT==2.15.1
+```
+
+JWT 생성 시 기존의 `sub`, `exp` 클레임과 HS256 서명 방식을 유지하고, 토큰 검증에서는 허용 알고리즘을 명시했다.
+
+```python
+payload = jwt.decode(
+    token,
+    secret_key,
+    algorithms=["HS256"],
+)
+```
+
+JWT 검증 오류는 `InvalidTokenError`로 처리했다.
+
+### 4.3 인증 보안 테스트
+
+JWT 라이브러리 전환 후 다음 시나리오를 테스트 대상으로 추가했다.
+
+- 만료된 JWT 거부
+- 허용하지 않은 서명 알고리즘 거부
+
+기존 인증 기능에 회귀 문제가 발생하지 않도록 전체 테스트도 실행 대상으로 포함했다.
+
+---
+
+## 5. Debian OS 취약점 해결
+
+최초 스캔에서는 Debian 13.7 기반 이미지의 OS 패키지에서도 취약점이 발견되었다.
+
+수정 가능한 취약점 가운데 `zlib1g`의 `CVE-2026-85091`을 확인했다.
+
+Dockerfile에 다음 보안 패치 단계를 추가했다.
+
+```dockerfile
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+이 과정에서 다음 원칙을 적용했다.
+
+- 수정 가능한 OS 패키지를 선택적으로 업데이트
+- 불필요한 추천 패키지 설치 방지
+- APT 패키지 목록 정리
+- 기존 비-root 컨테이너 보안 설정 유지
+
+이미지 재빌드 후 Trivy로 취약점 해결 여부를 재검증했다.
+
+---
+
+## 6. GitHub Actions 보안 스캔 자동화
+
+파일 위치:
+
+```text
+.github/workflows/security.yml
+```
+
+보안 검사 파이프라인:
+
+```text
+Git Push / Pull Request
+        |
+        v
+Docker Image Build
+        |
+        v
+Trivy Full Vulnerability Report
+        |
+        v
+Trivy Security Gate
+        |
+        +-- PASS: 차단 대상 취약점 0건
+        |
+        +-- FAIL: 차단 대상 취약점 1건 이상
+```
+
+### 6.1 전체 취약점 보고서
+
+```yaml
+- name: Trivy Full Vulnerability Report
+  uses: aquasecurity/trivy-action@v0.36.0
+  with:
+    scan-type: image
+    image-ref: tripcs-api:day30
+    scanners: vuln
+    format: table
+    severity: HIGH,CRITICAL
+    vuln-type: os,library
+    ignore-unfixed: false
+    exit-code: '0'
+```
+
+전체 보고서는 수정 버전 제공 여부와 관계없이 HIGH / CRITICAL 취약점을 표시한다.
+
+취약점이 발견되어도 이 단계 자체는 실패 처리하지 않는다.
+
+### 6.2 CI 보안 게이트
+
+```yaml
+- name: Trivy Security Gate
+  uses: aquasecurity/trivy-action@v0.36.0
+  with:
+    scan-type: image
+    image-ref: tripcs-api:day30
+    scanners: vuln
+    format: table
+    severity: HIGH,CRITICAL
+    vuln-type: os,library
+    ignore-unfixed: true
+    exit-code: '1'
+    skip-setup-trivy: true
+```
+
+보안 게이트는 수정 버전이 존재하는 HIGH / CRITICAL 취약점을 중심으로 검사하며, 차단 대상이 발견되면 CI를 실패시킨다.
+
+수정 버전이 없는 취약점도 별도의 전체 보고서를 통해 관리한다.
+
+---
+
+## 7. 개선 결과
+
+| 항목 | 최초 검사 | 최종 제공된 검사 로그 |
+|---|---:|---:|
+| Debian OS 취약점 | 48 | 0 |
+| Python 취약점 | 9 | 0 |
+| HIGH | 55 | 0 |
+| CRITICAL | 2 | 0 |
+| **전체** | **57** | **0** |
+
+최신 Trivy 로그에서 스캔 대상 이미지의 HIGH / CRITICAL 취약점이 0건으로 보고되었다.
+
+### 해석 시 주의점
+
+취약점 0건은 해당 검사 시점, 데이터베이스, 이미지 및 심각도 필터에서 탐지된 항목이 0건임을 의미한다.
+
+모든 보안 위험이 제거되었다는 뜻은 아니다.
+
+Trivy 데이터베이스가 갱신되면 기존 이미지에서도 새로운 취약점이 발견될 수 있다.
+
+---
+
+## 8. 검증 명령어
+
+### Python 테스트
+
+```powershell
+python -m pip check
+python -m pytest -v
+```
+
+### Docker 이미지 빌드
+
+```powershell
+docker build --pull --no-cache -t tripcs-api:day30 .
+```
+
+### Docker 통합 테스트
+
+```powershell
+.\scripts\smoke_test.ps1
+```
+
+### 패키지 확인
+
+```powershell
+docker run --rm --entrypoint python tripcs-api:day30 -m pip list
+```
+
+### GitHub Actions 검증
+
+GitHub Actions에서 다음 워크플로의 최종 상태를 확인한다.
+
+- TripCS Tests
+- TripCS Security Scan
+
+---
+
+## 9. 배운 점
+
+### 9.1 컨테이너 보안과 이미지 보안은 다르다
+
+비-root 실행, Capability 제거 등의 조치는 컨테이너의 실행 권한을 제한한다.
+
+반면 취약점 스캔은 이미지 내부 패키지에 알려진 보안 문제가 있는지 확인한다.
+
+두 방식은 서로 보완적이다.
+
+### 9.2 보안 스캔 결과를 실제 수정 작업과 연결해야 한다
+
+취약점 개수를 확인하는 것만으로는 충분하지 않다.
+
+영향받는 패키지, 설치 버전, 수정 가능 여부를 분석하고, 패치 후 다시 검사해야 한다.
+
+### 9.3 취약한 의존성은 라이브러리 교체로도 해결할 수 있다
+
+`python-jose`에서 `PyJWT`로 전환하면서 불필요해진 의존성도 제거했다.
+
+라이브러리 교체 시에는 토큰 생성, 검증, 예외 처리와 기존 인증 테스트를 함께 점검해야 한다.
+
+### 9.4 CI 보안 게이트는 취약점 재유입 방지에 도움이 된다
+
+새로운 코드 또는 의존성이 추가될 때도 GitHub Actions가 이미지를 검사한다.
+
+이를 통해 수정 가능한 심각한 취약점이 포함된 변경을 자동으로 탐지할 수 있다.
+
+---
+
+## 10. 향후 개선 사항
+
+- 외부 GitHub Action을 검증된 커밋 SHA로 고정
+- Trivy 스캐너 버전 주기적 업데이트
+- LOW / MEDIUM 취약점까지 포함한 정기 보고서
+- SARIF 보고서를 통한 GitHub 보안 결과 관리
+- 새롭게 공개되는 CVE에 대비한 정기 보안 스캔
+- 운영 이미지에서 개발 및 테스트 전용 패키지 분리
+
+---
+
+# Day31 — GitHub Actions + GHCR Docker 이미지 자동 배포
+
+## 1. 학습 목표
+
+GitHub Actions를 활용해 테스트와 보안 검사를 통과한 Docker 이미지를 GitHub Container Registry(GHCR)에 자동으로 게시한다.
+
+게시된 이미지를 로컬 환경에서 Pull하여 Docker Compose로 실행하고, API와 인프라 서비스가 정상적으로 동작하는지 검증한다.
+
+### 핵심 기술
+
+- GitHub Actions
+- Docker Buildx
+- GitHub Container Registry (GHCR)
+- Docker Compose
+- GitHub Actions `GITHUB_TOKEN`
+- Trivy 보안 게이트
+- Docker 이미지 태그 및 Digest
+
+---
+
+## 2. 문제 상황
+
+Day30까지 TripCS는 다음 CI 기능을 구현했다.
+
+- Python pytest 자동 실행
+- PostgreSQL / Redis / API 통합 테스트
+- Docker Compose Smoke Test
+- Alembic 마이그레이션 검증
+- Trivy 이미지 취약점 스캔
+- HIGH / CRITICAL 취약점 보안 게이트
+
+그러나 테스트와 보안 검사를 통과한 이미지를 별도로 게시하는 자동화는 없었다.
+
+개발 환경마다 Docker 이미지를 직접 빌드한다면 빌드 결과의 일관성과 배포 버전 추적이 어려워질 수 있다.
+
+이를 해결하기 위해 GHCR 기반 Docker 이미지 게시 파이프라인을 구축했다.
+
+---
+
+## 3. 전체 CI/CD 흐름
+
+```text
+Git Push (main)
+       |
+       +-------------------+
+       |                   |
+       v                   v
+ Python Tests       Docker Security Gate
+       |                   |
+       +---------+---------+
+                 |
+         Both jobs succeed
+                 |
+                 v
+        Docker Image Build
+                 |
+                 v
+        GitHub Container Registry
+                 |
+                 v
+       Docker Pull / Run 검증
+```
+
+Pull Request에서는 테스트와 보안 검사를 실행하되, GHCR 게시 Job은 실행하지 않도록 구성했다.
+
+`main` 브랜치 Push에서 두 검증 Job이 모두 성공해야 이미지가 게시된다.
+
+---
+
+## 4. GitHub Container Registry란?
+
+GHCR은 GitHub에서 제공하는 컨테이너 이미지 저장소다.
+
+일반적인 Docker 이미지 저장소와 마찬가지로 이미지를 Push하거나 Pull할 수 있다.
+
+TripCS에서 사용한 이미지 주소:
+
+```text
+ghcr.io/jinh03/trip_planner:latest
+```
+
+구성 요소:
+
+| 요소 | 의미 |
+|---|---|
+| `ghcr.io` | GitHub Container Registry |
+| `jinh03` | GitHub 소유자 |
+| `trip_planner` | 이미지 패키지 이름 |
+| `latest` | 이미지 태그 |
+
+이미지를 GitHub에 게시하면 개발 환경 외에도 인증 및 접근 권한이 허용된 다른 환경에서 동일한 이미지를 내려받아 실행할 수 있다.
+
+---
+
+## 5. GitHub Actions 게시 워크플로
+
+파일 위치:
+
+```text
+.github/workflows/publish.yml
+```
+
+### 5.1 Python 테스트
+
+Python 3.12와 Redis 서비스 컨테이너를 준비한 뒤 의존성을 설치하고 pytest를 실행한다.
+
+```yaml
+- name: Install dependencies
+  run: |
+    python -m pip install -r requirements.txt
+    python -m pip check
+
+- name: Run pytest
+  run: python -m pytest -v
+```
+
+### 5.2 Docker 보안 검사
+
+Docker 이미지를 빌드한 뒤 Trivy를 실행한다.
+
+```yaml
+- name: Trivy Security Gate
+  uses: aquasecurity/trivy-action@v0.36.0
+  with:
+    image-ref: tripcs-api:day31
+    scan-type: image
+    scanners: vuln
+    severity: HIGH,CRITICAL
+    vuln-type: os,library
+    ignore-unfixed: true
+    exit-code: '1'
+```
+
+수정 가능한 HIGH / CRITICAL 취약점이 발견되면 보안 검사 Job이 실패한다.
+
+### 5.3 검증 성공 후 게시
+
+```yaml
+publish:
+  name: Publish Image to GHCR
+  runs-on: ubuntu-latest
+
+  needs: [test, security]
+
+  if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+  permissions:
+    contents: read
+    packages: write
+```
+
+`needs`로 두 선행 Job의 성공을 요구한다.
+
+또한 `if` 조건으로 `main` 브랜치 Push에 대해서만 이미지를 게시하도록 제한했다.
+
+### 5.4 GHCR 로그인
+
+```yaml
+- name: Login to GHCR
+  uses: docker/login-action@v4
+  with:
+    registry: ghcr.io
+    username: ${{ github.actor }}
+    password: ${{ secrets.GITHUB_TOKEN }}
+```
+
+GitHub Actions가 제공하는 `GITHUB_TOKEN`을 이용해 Registry에 인증한다.
+
+패키지 게시에 필요한 `packages: write` 권한은 게시 Job에만 부여했다.
+
+### 5.5 Docker 이미지 게시
+
+```yaml
+- name: Build and push Docker image
+  uses: docker/build-push-action@v7
+  with:
+    context: .
+    push: true
+    tags: |
+      ${{ env.IMAGE_NAME }}:latest
+      ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+    labels: |
+      org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      org.opencontainers.image.revision=${{ github.sha }}
+```
+
+두 종류의 이미지 태그를 생성한다.
+
+- `latest`: 가장 최근 게시된 이미지를 가리키는 이동 가능한 태그
+- `sha-<commit>`: 이미지가 생성된 Git 커밋을 추적하기 위한 태그
+
+보안과 재현성이 중요한 배포에서는 이동 가능한 `latest`보다 특정 SHA 태그나 이미지 Digest 사용을 권장한다.
+
+---
+
+## 6. GitHub Actions 실행 결과
+
+실제 워크플로 실행에서 다음 세 Job이 모두 성공했다.
+
+| Job | 결과 | 실행 시간 |
+|---|---|---:|
+| Python Tests | 성공 | 38초 |
+| Docker Security Gate | 성공 | 47초 |
+| Publish Image to GHCR | 성공 | 39초 |
+
+Docker Build summary에서도 빌드가 `completed`로 표시되었다.
+
+---
+
+## 7. GHCR 이미지 Pull 검증
+
+로컬 PowerShell에서 다음 명령을 실행했다.
+
+```powershell
+docker pull ghcr.io/jinh03/trip_planner:latest
+```
+
+실제 결과:
+
+```text
+Status: Downloaded newer image for ghcr.io/jinh03/trip_planner:latest
+```
+
+확인된 이미지 Digest:
+
+```text
+sha256:0bba3e5b0750f7ba9332d40230ec425ed2ab5bbdeeffafaa6fabecd86316256f
+```
+
+Digest는 콘텐츠를 식별하는 데 사용되며, `latest` 태그와 달리 특정 이미지 콘텐츠를 가리키는 데 활용할 수 있다.
+
+### 이미지 내부 패키지 검증
+
+```powershell
+docker run --rm --entrypoint python ghcr.io/jinh03/trip_planner:latest -m pip show PyJWT
+```
+
+결과:
+
+```text
+Name: PyJWT
+Version: 2.15.1
+```
+
+기존 취약 패키지 확인:
+
+```powershell
+docker run --rm --entrypoint python ghcr.io/jinh03/trip_planner:latest -m pip show python-jose
+```
+
+결과:
+
+```text
+WARNING: Package(s) not found: python-jose
+```
+
+따라서 게시된 이미지에 PyJWT가 설치되었고 기존 `python-jose`가 포함되지 않았음을 확인했다.
+
+---
+
+## 8. GHCR 이미지 실행 검증
+
+기존 `compose.yaml`의 PostgreSQL, Redis, 환경변수, 보안 설정을 재사용하면서 API와 마이그레이션 이미지만 GHCR 이미지로 변경했다.
+
+### compose.ghcr.yaml
+
+```yaml
+services:
+  api:
+    image: ghcr.io/jinh03/trip_planner:latest
+
+  migrate:
+    image: ghcr.io/jinh03/trip_planner:latest
+```
+
+### Docker Compose 실행
+
+```powershell
+docker compose -f compose.yaml -f compose.ghcr.yaml up -d --no-build --force-recreate --wait --wait-timeout 180
+```
+
+`--no-build` 옵션을 사용해 로컬 Dockerfile을 다시 빌드하지 않고 Pull한 GHCR 이미지를 실행했다.
+
+### 컨테이너 상태
+
+| 서비스 | 실행 이미지 | 결과 |
+|---|---|---|
+| API | GHCR 이미지 | Healthy |
+| Migrate | GHCR 이미지 | Exited (0) |
+| PostgreSQL | postgres:18 | Healthy |
+| Redis | redis:7-alpine | Healthy |
+
+Alembic 마이그레이션 서비스가 종료 코드 0으로 완료되었고 API 컨테이너도 정상 상태로 실행되었다.
+
+---
+
+## 9. API Healthcheck 검증
+
+다음 명령을 실행했다.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health/live
+Invoke-RestMethod http://127.0.0.1:8000/health/ready
+```
+
+두 엔드포인트 모두 다음 상태를 반환했다.
+
+```text
+status
+------
+ok
+```
+
+이를 통해 GHCR에서 내려받은 이미지로 실행한 API가 정상적으로 응답함을 확인했다.
+
+---
+
+## 10. 배운 점
+
+### 10.1 CI와 CD의 차이
+
+CI는 코드 변경에 대한 테스트와 검증을 자동화한다.
+
+CD는 검증된 결과물을 게시하거나 배포하는 과정을 자동화한다.
+
+Day31에서는 이미지 Registry 게시를 자동화했으며, 실제 운영 서버 배포는 다음 단계의 과제로 남겼다.
+
+### 10.2 보안 검사와 이미지 게시 순서
+
+테스트 또는 보안 검사가 실패했다면 이미지를 게시하지 않아야 한다.
+
+`needs: [test, security]`를 통해 선행 검증이 실패한 경우 게시 Job을 실행하지 않도록 구성했다.
+
+### 10.3 이미지 태그와 Digest
+
+`latest`는 최신 버전을 가리키기 편리하지만 시간이 지나면 다른 이미지로 변경될 수 있다.
+
+Git SHA 기반 태그는 변경 이력을 추적하기 좋다.
+
+Digest는 특정 이미지 콘텐츠를 식별하는 데 사용하며 재현 가능한 배포에 유용하다.
+
+### 10.4 Build 성공과 실행 성공은 다르다
+
+이미지가 정상 빌드되었다고 해서 실제 실행까지 성공한다는 보장은 없다.
+
+따라서 GHCR에서 이미지를 Pull하고, Compose로 실행한 뒤 DB, Redis, 마이그레이션, API Healthcheck까지 확인했다.
+
+---
+

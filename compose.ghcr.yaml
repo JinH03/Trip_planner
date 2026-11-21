@@ -1,0 +1,7 @@
+
+services:
+  api:
+    image: ghcr.io/jinh03/trip_planner:latest
+
+  migrate:
+    image: ghcr.io/jinh03/trip_planner:latest
